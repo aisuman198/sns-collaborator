@@ -1,4 +1,5 @@
 # sns-collaborator
+## 各種設定
 ### 1. Discord Botの設定
 1. Discord Developer Portalにアクセスして新しいアプリケーションを作成
 2. Botの作成：Botセクションに移動して新しいボットを作成
@@ -27,3 +28,7 @@ $ node src/app.js
 ```
 
 ### 4. Discord該当チャンネルにメッセージ投稿
+Welcome to Underground
+
+## 利用してるモジュール
+[misskey.js](https://github.com/misskey-dev/misskey.js)
