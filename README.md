@@ -11,8 +11,6 @@ https://discord.com/oauth2/authorize?client_id=<クライアントID>&scope=bot&
 ```
 ### 2. アプリケーションのルートに `.env` ファイル作る
 ```sh
-PORT=5000 # 好きなポート
-
 DISCORD_CHANNEL_ID=<チャンネルID>
 DISCORD_TOKEN=<DISCORD_TOKEN>
 
@@ -22,9 +20,17 @@ MISSKEY_API_TOKEN=<MISSKEY_API_TOKEN>
 
 ### 3. アプリケーション起動
 ```sh
-# node入れてる前提で
+# Node.js 20 以上が必要
 $ npm install
-$ node src/app.js
+$ npm start
+
+# 開発時（ファイル変更で自動再起動）
+$ npm run dev
+```
+
+### テスト
+```sh
+$ npm test
 ```
 
 ### 4. Discord該当チャンネルにメッセージ投稿
