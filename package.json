@@ -7,7 +7,10 @@
   "scripts": {
     "start": "node src/app.js",
     "dev": "node --watch src/app.js",
-    "test": "node --test"
+    "test": "node --test",
+    "launchd:install": "node scripts/launchd.js install",
+    "launchd:uninstall": "node scripts/launchd.js uninstall",
+    "launchd:print": "node scripts/launchd.js print"
   },
   "keywords": [],
   "author": "",
