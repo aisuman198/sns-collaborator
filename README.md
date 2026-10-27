@@ -31,6 +31,28 @@ $ npm run dev
 ### 4. Discord該当チャンネルにメッセージ投稿
 Welcome to Underground
 
+## ログイン時に自動起動する（macOS launchd）
+LaunchAgent として登録すると、macOS へのログイン時に bot が自動起動します（ログイン時起動であり、ログイン前のブート直後には起動しません）。異常終了時は自動で再起動されます。
+
+```sh
+# 登録（plist 生成 → ~/Library/LaunchAgents に配置 → 起動）
+$ npm run launchd:install
+
+# 生成される plist の確認のみ（副作用なし）
+$ npm run launchd:print
+
+# 解除
+$ npm run launchd:uninstall
+
+# ログ確認
+$ tail -f ~/Library/Logs/sns-collaborator/out.log
+
+# 状態確認
+$ launchctl print gui/$(id -u)/local.sns-collaborator
+```
+
+install 時の node のパスとリポジトリの場所が plist に記録されます。node のバージョンを切り替えた場合やリポジトリを移動した場合は、再度 `npm run launchd:install` が必要です。
+
 ## テスト
 ```sh
 $ npm test
