@@ -2,7 +2,7 @@
 import dotenv from 'dotenv';
 import { Client, GatewayIntentBits } from 'discord.js';
 import * as Misskey from 'misskey-js';
-import { createMessageHandler, loadConfig } from './forwarder.js';
+import { ConfigError, createMessageHandler, loadConfig } from './forwarder.js';
 
 // 環境変数のロード
 dotenv.config();
@@ -25,6 +25,11 @@ async function main() {
         credential: config.misskeyApiToken,
     });
 
+    // Discordクライアントのエラーはログ出力のみ（プロセスは落とさない）
+    discordClient.on('error', (error) => {
+        console.error('Discord client error:', error);
+    });
+
     // Discordのイベントキャッチ
     discordClient.on('messageCreate', createMessageHandler(misskeyClient, config.channelId));
 
@@ -33,6 +38,10 @@ async function main() {
 }
 
 main().catch((error) => {
-    console.error(error instanceof Error ? error.message : error);
+    if (error instanceof ConfigError) {
+        console.error(error.message);
+    } else {
+        console.error(error);
+    }
     process.exitCode = 1;
 });

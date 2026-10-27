@@ -1,6 +1,6 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
-import { createMessageHandler, loadConfig, shouldForward } from '../src/forwarder.js';
+import { ConfigError, createMessageHandler, loadConfig, shouldForward } from '../src/forwarder.js';
 
 const CHANNEL_ID = 'chan-1';
 const msg = (overrides = {}) => ({
@@ -76,5 +76,8 @@ describe('loadConfig', () => {
             () => loadConfig({ ...full, DISCORD_TOKEN: '', MISSKEY_API_TOKEN: undefined }),
             /DISCORD_TOKEN, MISSKEY_API_TOKEN/,
         );
+    });
+    it('設定不足は ConfigError を投げる', () => {
+        assert.throws(() => loadConfig({}), ConfigError);
     });
 });

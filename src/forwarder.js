@@ -34,13 +34,21 @@ export const REQUIRED_ENV = [
     'MISSKEY_API_TOKEN',
 ];
 
+/** 想定内の設定エラー（環境変数不足など）。 */
+export class ConfigError extends Error {
+    constructor(message) {
+        super(message);
+        this.name = 'ConfigError';
+    }
+}
+
 /**
- * 必須環境変数を検証して返す。欠けていれば Error を投げる。
+ * 必須環境変数を検証して返す。欠けていれば ConfigError を投げる。
  */
 export function loadConfig(env = process.env) {
     const missing = REQUIRED_ENV.filter((key) => !env[key]);
     if (missing.length > 0) {
-        throw new Error(
+        throw new ConfigError(
             `必須の環境変数が設定されていません: ${missing.join(', ')}\n` +
                 '.env ファイルまたは環境変数で設定してください（README 参照）。',
         );

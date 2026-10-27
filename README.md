@@ -28,13 +28,13 @@ $ npm start
 $ npm run dev
 ```
 
-### テスト
+### 4. Discord該当チャンネルにメッセージ投稿
+Welcome to Underground
+
+## テスト
 ```sh
 $ npm test
 ```
-
-### 4. Discord該当チャンネルにメッセージ投稿
-Welcome to Underground
 
 ## 利用してるモジュール
 [misskey.js](https://github.com/misskey-dev/misskey.js)
