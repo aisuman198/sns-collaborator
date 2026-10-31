@@ -98,7 +98,6 @@ async function main() {
     const monitor = createHealthMonitor({
         logger,
         stats,
-        intervalMs: parseMinutes(process.env.HEALTH_INTERVAL_MINUTES, 10) * 60 * 1000,
         maxNotReadyMs: parseMinutes(process.env.HEALTH_MAX_NOT_READY_MINUTES, 5) * 60 * 1000,
         getStatus: () => ({
             ready: discordClient.isReady(),
