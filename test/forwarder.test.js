@@ -115,19 +115,42 @@ describe('buildNoteText', () => {
         const text = buildNoteText(
             msg({ content: '@everyone @here <@1> <@!2> <@&3> <#4> hi <:foo:5> <a:bar:6>  \n\n\n\nend  ' }),
         );
-        assert.equal(text, 'hi :foo: :bar:\n\nend');
+        assert.equal(text, 'hi :foo: :bar:\nend');
     });
-    it('embed の author/title/url/description を連結し重複行を除く', () => {
+    it('embed の title/url を連結し重複行を除く（author/description は含めない）', () => {
         const text = buildNoteText(
             msg({
                 content: 'Live!',
                 embeds: [
                     { author: { name: 'Streamer' }, title: 'Live!', url: 'https://x.example/l', description: 'desc' },
-                    { description: 'desc' },
                 ],
             }),
         );
-        assert.equal(text, 'Live!\nStreamer\nhttps://x.example/l\ndesc');
+        assert.equal(text, 'Live!\nhttps://x.example/l');
+    });
+    it('Streamcord の実データが旧サーバの書式と完全一致する', () => {
+        const text = buildNoteText(
+            msg({
+                content: '@everyone\n\n配信の時間だよ〜',
+                embeds: [
+                    {
+                        type: 'rich',
+                        url: 'https://twitch.tv/aisu_is_198',
+                        title: '【#MechaBREAK】#112 週末ブレイク【参加◎】',
+                        color: 6570404,
+                        timestamp: '2026-01-01T00:00:00.000Z',
+                        fields: [{ name: 'Game', value: 'MechaBREAK', inline: true }],
+                        author: { name: 'aisu_is_198 is now live!' },
+                        image: { url: 'https://img.example/x.jpg' },
+                        footer: { text: 'Twitch' },
+                    },
+                ],
+            }),
+        );
+        assert.equal(
+            text,
+            '配信の時間だよ〜\n【#MechaBREAK】#112 週末ブレイク【参加◎】\nhttps://twitch.tv/aisu_is_198',
+        );
     });
     it('メンションのみで embed なしなら null', () => {
         assert.equal(buildNoteText(msg({ content: '@everyone <@1>', embeds: [] })), null);
@@ -188,7 +211,7 @@ describe('許可 bot と空スキップ→更新', () => {
             }),
         );
         assert.deepEqual(calls, [
-            ['notes/create', { text: '○○ is now live!\nTitle\nhttps://t.example/x\nDesc' }],
+            ['notes/create', { text: '○○ is now live!\nTitle\nhttps://t.example/x' }],
         ]);
     });
 

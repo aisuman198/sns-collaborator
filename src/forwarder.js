@@ -39,24 +39,25 @@ function truncate(text, max) {
 }
 
 /**
- * 投稿本文を組み立てる。content と embed（author.name / title / url / description）を連結する。
+ * 投稿本文を組み立てる。content → 各 embed の title → url の順に改行区切りで連結する（旧サーバと同じ書式）。
+ * author.name / fields / footer / description は含めない。空行は詰め、重複行は除く。
  * 結果が空なら null。
  */
 export function buildNoteText(message) {
     const parts = [];
     const seen = new Set();
     const add = (value) => {
-        const cleaned = cleanDiscordText(value);
-        if (!cleaned || seen.has(cleaned)) return;
-        seen.add(cleaned);
-        parts.push(cleaned);
+        for (const line of cleanDiscordText(value).split('\n')) {
+            const trimmed = line.trim();
+            if (!trimmed || seen.has(trimmed)) continue;
+            seen.add(trimmed);
+            parts.push(trimmed);
+        }
     };
     add(message.content);
     for (const embed of message.embeds ?? []) {
-        add(embed.author?.name);
         add(embed.title);
         add(embed.url);
-        add(embed.description);
     }
     if (parts.length === 0) return null;
     return truncate(parts.join('\n'), MAX_NOTE_LENGTH);
