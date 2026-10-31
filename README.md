@@ -16,7 +16,20 @@ DISCORD_TOKEN=<DISCORD_TOKEN>
 
 MISSKEY_INSTANCE_URL=https://misskey.io
 MISSKEY_API_TOKEN=<MISSKEY_API_TOKEN>
+
+# 任意: 転送を許可する bot のユーザー ID（カンマ区切り）
+DISCORD_ALLOWED_BOT_IDS=<bot ID>,<bot ID>
 ```
+
+#### 通知 bot（Streamcord など）の投稿を転送する
+既定では bot の発言は転送されません。Streamcord などの通知 bot の投稿を転送したい場合は `DISCORD_ALLOWED_BOT_IDS` にその bot のユーザー ID をカンマ区切りで指定します（空白は無視、自分自身の発言は常に除外）。
+ID は、対象チャンネルで bot 発言が除外されたときの INFO ログ（`bot 発言を除外しました: author=... id=...`）か、Discord の開発者モードを有効にして bot のユーザーを右クリック →「ユーザー ID をコピー」で取得できます。
+
+#### 投稿本文の組み立てルール
+- `message.content` から `@everyone` / `@here`、メンション（`<@123>` `<@!123>` `<@&123>`）、チャンネル参照（`<#123>`）を除去し、カスタム絵文字は `:name:` に変換、前後の空白を整理し、空行は詰める
+- 続けて各 embed の title・url をこの順に追加し、改行区切りで連結（旧サーバと同じ「本文・タイトル・URL」書式。embed の author 名・fields・footer・description は含めない。同じ内容の行は 1 回だけ）
+- 結果が空なら投稿せず `転送する本文が空のためスキップ` を INFO ログに出力（heartbeat の `emptySkipped`）。Streamcord のように embed が後から付く場合に備え、空スキップしたメッセージ（直近 100 件）が更新されて本文が付いたときは 1 回だけ転送します（転送済みは再投稿しません）
+- Misskey の上限に合わせ 3000 文字を超えたら切り詰め（末尾 `…`）
 
 ### 3. アプリケーション起動
 ```sh
@@ -52,6 +65,38 @@ $ launchctl print gui/$(id -u)/local.sns-collaborator
 ```
 
 install 時の node のパスとリポジトリの場所が plist に記録されます。node のバージョンを切り替えた場合やリポジトリを移動した場合は、再度 `npm run launchd:install` が必要です。
+
+## ログの見方・生存確認
+全ログは `[ISO8601] LEVEL message` 形式で出力されます（INFO/WARN は stdout、ERROR は stderr）。
+
+出力されるログの種類:
+- 起動時: `ログイン完了: <ユーザータグ> / 監視チャンネルID=...`、続けて `監視チャンネル取得成功: name=...`（ID違い・権限不足・未参加なら ERROR）
+- 接続状態: `shard N 切断` / `再接続中` / `再開` / `エラー`、`セッションが無効化`、`Discord warn`
+- 転送: `Misskeyへの投稿が成功しました。` / `失敗しました`
+- スリープ復帰検知 / `Discord が READY でない状態が ... 続いたため終了します`
+- 空スキップ・bot 除外（INFO）
+
+heartbeat（ws 状態・統計など）は out.log には出さず、**上書きされる最新ステータスファイル**に書き出します（状態確認の tick ごと、最大 1 分間隔。常に最新 1 回分のみ）。
+
+```
+$ cat ~/Library/Logs/sns-collaborator/heartbeat.log
+[2026-11-01T01:23:45.000Z] heartbeat ws=READY ping=45ms uptime=4d0h12m3s received=120 targetChannel=8 botSkipped=1 emptySkipped=0 forwardOk=7 forwardFail=0 lastReceived=2026-11-01T01:23:45.000Z
+```
+
+ファイルの更新時刻（`ls -l`）が 2 分以上古ければ、プロセス停止の疑いがあります。書き込みに失敗してもプロセスは落ちず、ERROR を 1 回だけ出力します（回復時に INFO を 1 回）。
+
+heartbeat の読み方:
+- `ws=NOT_READY` が続く: Discord に接続できていない（下記の自動再起動の対象）
+- `ws=READY` なのに `received` が 0 のまま増えない: イベントがそもそも届いていない（Intent・Bot の参加サーバー・権限を確認）
+- `received` は増えるが `targetChannel=0`: `DISCORD_CHANNEL_ID` の誤りの可能性
+- `targetChannel` は増えるが `forwardOk` が増えない: `botSkipped`（bot 発言）か `forwardFail`（Misskey 側の失敗）を確認
+- `lastReceived` で最後にメッセージを受けた時刻が分かる
+
+環境変数（任意）:
+- `HEALTH_STATUS_FILE`: ステータスファイルのパス（既定 `~/Library/Logs/sns-collaborator/heartbeat.log`）
+- `HEALTH_MAX_NOT_READY_MINUTES`: READY でない状態がこの分数続いたら終了（分、既定 5）
+
+自動再起動の条件: Discord が READY でない状態が `HEALTH_MAX_NOT_READY_MINUTES` 続くと ERROR ログを出して終了コード 1 で終了し、launchd（KeepAlive）が再起動します。状態確認は最大 1 分間隔で行います。Mac のスリープ復帰（前回確認から確認間隔の 2 倍超）を検知した場合は `スリープ復帰を検知` を出力し、再接続の猶予として未接続時間の計測をリセットします。
 
 ## テスト
 ```sh
