@@ -1,4 +1,5 @@
 // 転送判定・投稿ロジック（外部依存を注入できるようにしてテスト可能にする）
+import { createStats } from './stats.js';
 
 /**
  * メッセージを Misskey に転送すべきか判定する。
@@ -13,15 +14,29 @@ export function shouldForward(message, channelId) {
  * messageCreate 用ハンドラを生成する。
  * 投稿失敗時は例外を外に出さず、logger.error に記録する。
  */
-export function createMessageHandler(misskeyClient, channelId, logger = console) {
+export function createMessageHandler(
+    misskeyClient,
+    channelId,
+    logger = console,
+    stats = createStats(),
+    now = Date.now,
+) {
     return async (message) => {
+        stats.received += 1;
+        stats.lastReceivedAt = now();
+        if (message.channel?.id === channelId) {
+            stats.targetChannel += 1;
+            if (message.author?.bot) stats.botSkipped += 1;
+        }
         if (!shouldForward(message, channelId)) return;
         try {
             await misskeyClient.request('notes/create', {
                 text: message.content,
             });
+            stats.forwardSucceeded += 1;
             logger.log('Misskeyへの投稿が成功しました。');
         } catch (error) {
+            stats.forwardFailed += 1;
             logger.error('Misskeyへの投稿に失敗しました:', error);
         }
     };
