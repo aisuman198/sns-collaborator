@@ -70,7 +70,7 @@ export function createHealthMonitor({
         logger.info(
             `heartbeat ws=${status.ready ? 'READY' : 'NOT_READY'} ping=${status.ping}ms ` +
                 `uptime=${formatDuration(status.uptimeMs)} ` +
-                `received=${stats.received} targetChannel=${stats.targetChannel} botSkipped=${stats.botSkipped} ` +
+                `received=${stats.received} targetChannel=${stats.targetChannel} botSkipped=${stats.botSkipped} emptySkipped=${stats.emptySkipped} ` +
                 `forwardOk=${stats.forwardSucceeded} forwardFail=${stats.forwardFailed} lastReceived=${last}`,
         );
     }

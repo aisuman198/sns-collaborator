@@ -16,7 +16,20 @@ DISCORD_TOKEN=<DISCORD_TOKEN>
 
 MISSKEY_INSTANCE_URL=https://misskey.io
 MISSKEY_API_TOKEN=<MISSKEY_API_TOKEN>
+
+# 任意: 転送を許可する bot のユーザー ID（カンマ区切り）
+DISCORD_ALLOWED_BOT_IDS=<bot ID>,<bot ID>
 ```
+
+#### 通知 bot（Streamcord など）の投稿を転送する
+既定では bot の発言は転送されません。Streamcord などの通知 bot の投稿を転送したい場合は `DISCORD_ALLOWED_BOT_IDS` にその bot のユーザー ID をカンマ区切りで指定します（空白は無視、自分自身の発言は常に除外）。
+ID は、対象チャンネルで bot 発言が除外されたときの INFO ログ（`bot 発言を除外しました: author=... id=...`）か、Discord の開発者モードを有効にして bot のユーザーを右クリック →「ユーザー ID をコピー」で取得できます。
+
+#### 投稿本文の組み立てルール
+- `message.content` から `@everyone` / `@here`、メンション（`<@123>` `<@!123>` `<@&123>`）、チャンネル参照（`<#123>`）を除去し、カスタム絵文字は `:name:` に変換、前後の空白と連続空行を整理
+- 続けて各 embed の author 名・title・url・description をこの順に追加（同じ内容の行は 1 回だけ）
+- 結果が空なら投稿せず `転送する本文が空のためスキップ` を INFO ログに出力（heartbeat の `emptySkipped`）。Streamcord のように embed が後から付く場合に備え、空スキップしたメッセージ（直近 100 件）が更新されて本文が付いたときは 1 回だけ転送します（転送済みは再投稿しません）
+- Misskey の上限に合わせ 3000 文字を超えたら切り詰め（末尾 `…`）
 
 ### 3. アプリケーション起動
 ```sh
@@ -61,7 +74,7 @@ install 時の node のパスとリポジトリの場所が plist に記録さ�
 - 接続状態: `shard N 切断` / `再接続中` / `再開` / `エラー`、`セッションが無効化`、`Discord warn`
 - 転送: `Misskeyへの投稿が成功しました。` / `失敗しました`
 - `heartbeat`: 既定 10 分ごと。例
-  `heartbeat ws=READY ping=45ms uptime=4d0h12m3s received=120 targetChannel=8 botSkipped=1 forwardOk=7 forwardFail=0 lastReceived=2026-11-01T01:23:45.000Z`
+  `heartbeat ws=READY ping=45ms uptime=4d0h12m3s received=120 targetChannel=8 botSkipped=1 emptySkipped=0 forwardOk=7 forwardFail=0 lastReceived=2026-11-01T01:23:45.000Z`
 
 heartbeat の読み方:
 - `ws=NOT_READY` が続く: Discord に接続できていない（下記の自動再起動の対象）

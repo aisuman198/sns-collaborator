@@ -2,7 +2,13 @@
 import dotenv from 'dotenv';
 import { Client, Events, GatewayIntentBits } from 'discord.js';
 import * as Misskey from 'misskey-js';
-import { ConfigError, createMessageHandler, loadConfig } from './forwarder.js';
+import {
+    ConfigError,
+    createForwardTracker,
+    createMessageHandler,
+    createMessageUpdateHandler,
+    loadConfig,
+} from './forwarder.js';
 import { createHealthMonitor, parseMinutes } from './health.js';
 import { createLogger } from './logger.js';
 import { createStats } from './stats.js';
@@ -72,9 +78,20 @@ async function main() {
     });
 
     // Discordのイベントキャッチ
+    const tracker = createForwardTracker();
+    const handlerOptions = {
+        allowedBotIds: config.allowedBotIds,
+        selfId: () => discordClient.user?.id,
+        tracker,
+    };
     discordClient.on(
         Events.MessageCreate,
-        createMessageHandler(misskeyClient, config.channelId, logger, stats),
+        createMessageHandler(misskeyClient, config.channelId, logger, stats, Date.now, handlerOptions),
+    );
+    // 通知 bot は embed が後から付くことがあるため、空スキップ済みメッセージの更新を拾う
+    discordClient.on(
+        Events.MessageUpdate,
+        createMessageUpdateHandler(misskeyClient, config.channelId, logger, stats, handlerOptions),
     );
 
     // 生存確認モニタ（READY でない状態が続いたら終了 → launchd が再起動）
