@@ -28,6 +28,7 @@ describe('createHealthMonitor', () => {
         for (let i = 0; i < 3; i++) advance(MIN);
         assert.equal(writes.length, 3);
         assert.match(writes[2], /^\[1970-01-01T00:03:00\.000Z\] heartbeat ws=READY ping=42ms .*received=0 .*lastReceived=なし/);
+        assert.match(writes[2], /forwardFail=0 shareOk=0 shareFail=0 /);
         assert.equal(infos.filter((m) => m.includes('heartbeat')).length, 0);
     });
 

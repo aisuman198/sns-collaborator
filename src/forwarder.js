@@ -83,9 +83,13 @@ export function createBoundedSet(limit = TRACK_LIMIT) {
     };
 }
 
-/** 空スキップ済み・転送済みメッセージ ID の記録（messageCreate / messageUpdate で共有）。 */
+/** 空スキップ済み・転送済み・共有済みメッセージ ID の記録（messageCreate / messageUpdate で共有）。 */
 export function createForwardTracker(limit = TRACK_LIMIT) {
-    return { skippedEmpty: createBoundedSet(limit), forwarded: createBoundedSet(limit) };
+    return {
+        skippedEmpty: createBoundedSet(limit),
+        forwarded: createBoundedSet(limit),
+        shared: createBoundedSet(limit), // twitter共有用チャンネルへ投稿済み（Misskey 転送とは独立に追跡）
+    };
 }
 
 const resolveSelfId = (selfId) => (typeof selfId === 'function' ? selfId() : selfId ?? null);
@@ -109,9 +113,34 @@ async function postNote(misskeyClient, message, text, logger, stats, tracker) {
 }
 
 /**
+ * twitter共有用チャンネルへ投稿する（許可 bot の投稿のみ・共有済みは再投稿しない）。
+ * 失敗しても例外を出さない。Misskey 転送とは独立。
+ */
+async function postShare(share, message, text, logger, stats, tracker, allowedBotIds) {
+    if (typeof share !== 'function') return;
+    if (!message.author?.bot || !allowedBotIds.includes(message.author.id)) return;
+    if (tracker.shared.has(message.id)) return;
+    try {
+        await share(text, message);
+        stats.shareSucceeded = (stats.shareSucceeded ?? 0) + 1;
+        tracker.shared.add(message.id);
+        logger.log(`twitter共有用チャンネルへの投稿が成功しました。 (許可 bot ${describeAuthor(message.author)})`);
+    } catch (error) {
+        stats.shareFailed = (stats.shareFailed ?? 0) + 1;
+        logger.error('twitter共有用チャンネルへの投稿に失敗しました:', error);
+    }
+}
+
+/** 本文が確定したメッセージを共有・Misskey 転送の両方へ（互いの失敗に影響されない）。 */
+async function deliver(message, text, { misskeyClient, share, logger, stats, tracker, allowedBotIds }) {
+    await postShare(share, message, text, logger, stats, tracker, allowedBotIds);
+    await postNote(misskeyClient, message, text, logger, stats, tracker);
+}
+
+/**
  * messageCreate 用ハンドラを生成する。
  * 投稿失敗時は例外を外に出さず、logger.error に記録する。
- * options: { allowedBotIds, selfId (文字列 or 関数), tracker }
+ * options: { allowedBotIds, selfId (文字列 or 関数), tracker, share (任意: (text, message) => Promise。許可 bot の投稿を twitter共有用チャンネルへ) }
  */
 export function createMessageHandler(
     misskeyClient,
@@ -121,7 +150,7 @@ export function createMessageHandler(
     now = Date.now,
     options = {},
 ) {
-    const { allowedBotIds = [], selfId = null, tracker = createForwardTracker() } = options;
+    const { allowedBotIds = [], selfId = null, tracker = createForwardTracker(), share = null } = options;
     return async (message) => {
         stats.received += 1;
         stats.lastReceivedAt = now();
@@ -148,7 +177,7 @@ export function createMessageHandler(
             logger.info?.('転送する本文が空のためスキップ');
             return;
         }
-        await postNote(misskeyClient, message, text, logger, stats, tracker);
+        await deliver(message, text, { misskeyClient, share, logger, stats, tracker, allowedBotIds });
     };
 }
 
@@ -163,7 +192,7 @@ export function createMessageUpdateHandler(
     stats = createStats(),
     options = {},
 ) {
-    const { allowedBotIds = [], selfId = null, tracker } = options;
+    const { allowedBotIds = [], selfId = null, tracker, share = null } = options;
     return async (_oldMessage, newMessage) => {
         try {
             if (!tracker.skippedEmpty.has(newMessage.id) || tracker.forwarded.has(newMessage.id)) return;
@@ -180,7 +209,7 @@ export function createMessageUpdateHandler(
             const text = buildNoteText(message);
             if (text === null) return;
             logger.info?.('更新で本文が付与されたため転送します');
-            await postNote(misskeyClient, message, text, logger, stats, tracker);
+            await deliver(message, text, { misskeyClient, share, logger, stats, tracker, allowedBotIds });
         } catch (error) {
             logger.error('messageUpdate の処理に失敗しました:', error);
         }
@@ -259,5 +288,7 @@ export function loadConfig(env = process.env, home = homedir()) {
         misskeyInstanceUrl: env.MISSKEY_INSTANCE_URL,
         misskeyApiToken: env.MISSKEY_API_TOKEN,
         allowedBotIds: parseIdList(env.DISCORD_ALLOWED_BOT_IDS),
+        // twitter共有用チャンネル（未設定なら null = ライブ配信告知の共有投稿は行わない）
+        postChannelId: env.DISCORD_POST_CHANNEL_ID || null,
     };
 }

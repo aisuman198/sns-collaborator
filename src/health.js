@@ -93,6 +93,7 @@ export function createHealthMonitor({
                 `uptime=${formatDuration(status.uptimeMs)} ` +
                 `received=${stats.received} targetChannel=${stats.targetChannel} botSkipped=${stats.botSkipped} emptySkipped=${stats.emptySkipped} ` +
                 `forwardOk=${stats.forwardSucceeded} forwardFail=${stats.forwardFailed} ` +
+                `shareOk=${stats.shareSucceeded ?? 0} shareFail=${stats.shareFailed ?? 0} ` +
                 `niconicoOk=${stats.niconicoFetchOk ?? 0} niconicoFail=${stats.niconicoFetchFailed ?? 0} niconicoAnnounced=${stats.niconicoAnnounced ?? 0} lastReceived=${last}`;
         try {
             writeStatus(line);
