@@ -14,6 +14,7 @@ import {
 } from '../src/announcer.js';
 import { ConfigError, createMessageHandler, loadConfig } from '../src/forwarder.js';
 import { createHealthMonitor } from '../src/health.js';
+import { parseCheckTimes } from '../src/schedule.js';
 import { createStats } from '../src/stats.js';
 
 const NOW = Date.parse('2026-11-10T12:00:00Z');
@@ -472,7 +473,10 @@ describe('bot 自身の配信告知投稿は Misskey に二重転送されない
     });
 });
 
-describe('createPoller', () => {
+describe('createPoller (定刻 12:30 / 21:30 JST)', () => {
+    const MIN = 60 * 1000;
+    const T = (iso) => Date.parse(iso);
+    const TIMES = parseCheckTimes('12:30,21:30');
     const fakeTimers = () => {
         const q = [];
         return {
@@ -481,46 +485,253 @@ describe('createPoller', () => {
             clearTimeoutFn: (h) => { h.cleared = true; },
         };
     };
-    it('完了後に次を予約する（重複実行しない）', async () => {
+
+    // 実 announcer + 実 store + 偽の時計・タイマーでポーラーを組み立てる
+    function pollerSetup({ start, ...opts }) {
+        const clock = { t: T(start) };
+        const calls = { page: 0, all: 0 };
+        const failPage = { on: false };
+        const failAll = { on: false };
+        const t = setup({
+            now: () => clock.t,
+            fetchPage: async () => {
+                calls.page += 1;
+                if (failPage.on) throw new Error('page failed');
+                return { items: opts.items ?? [] };
+            },
+            fetchAll: async () => {
+                calls.all += 1;
+                if (failAll.on) throw new Error('all failed');
+                return [];
+            },
+            destinations: opts.destinations,
+        });
         const ft = fakeTimers();
-        let running = 0;
-        let maxRunning = 0;
-        let calls = 0;
         const poller = createPoller({
-            tick: async () => { calls += 1; running += 1; maxRunning = Math.max(maxRunning, running); await Promise.resolve(); running -= 1; },
-            intervalMs: 300000,
+            inspect: t.announcer.inspect,
+            tick: t.announcer.tick,
+            checkTimes: TIMES,
+            logger: t.logger,
+            now: () => clock.t,
+            ...ft,
+        });
+        poller.start();
+        // 保留中のタイマーを 1 回発火する（minutes 分進めてから）
+        const step = async (minutes = 1) => {
+            clock.t += minutes * MIN;
+            await ft.q.at(-1).fn();
+        };
+        return { ...t, clock, calls, failPage, failAll, ft, poller, step };
+    }
+
+    it('定刻前は実行されず、定刻を過ぎると 1 回だけ実行され、同じ定刻で再実行されない', async () => {
+        seedState({ lastRunAt: T('2026-11-10T03:31:00Z') }); // 12:31 JST に実行済み
+        const p = pollerSetup({ start: '2026-11-10T12:27:00Z' }); // 21:27 JST
+        await p.ft.q[0].fn(); // 開始直後の判定
+        await p.step(); // 21:28
+        await p.step(); // 21:29
+        assert.equal(p.calls.page, 0);
+        await p.step(); // 21:30
+        assert.equal(p.calls.page, 1);
+        assert.equal(readState().lastRunAt, T('2026-11-10T12:30:00Z'));
+        await p.step();
+        await p.step(60);
+        assert.equal(p.calls.page, 1);
+    });
+    it('スリープで 2 回分以上の定刻を飛ばしても復帰後に 1 回だけ実行する', async () => {
+        seedState({ lastRunAt: T('2026-11-08T12:31:00Z') });
+        const p = pollerSetup({ start: '2026-11-10T12:40:00Z' });
+        await p.ft.q[0].fn();
+        await p.step();
+        await p.step();
+        assert.equal(p.calls.page, 1);
+    });
+    it('定刻の間の再起動では実行されない', async () => {
+        seedState({ lastRunAt: T('2026-11-10T03:31:00Z') }); // 12:31 JST に実行済み
+        const p = pollerSetup({ start: '2026-11-10T06:00:00Z' }); // 15:00 JST に再起動
+        await p.ft.q[0].fn();
+        await p.step();
+        assert.equal(p.calls.page, 0);
+    });
+    it('定刻を飛ばした再起動では実行される', async () => {
+        seedState({ lastRunAt: T('2026-11-10T03:31:00Z') }); // 12:31 JST に実行済み
+        const p = pollerSetup({ start: '2026-11-10T12:45:00Z' }); // 21:45 JST（21:30 を飛ばした）
+        await p.ft.q[0].fn();
+        assert.equal(p.calls.page, 1);
+    });
+    it('日付またぎでも前日 21:30 が直近として扱われる（JST 0:10 の起動で前日 21:31 実行済みなら実行しない）', async () => {
+        seedState({ lastRunAt: T('2026-11-09T12:31:00Z') }); // 11/9 21:31 JST
+        const p = pollerSetup({ start: '2026-11-09T15:10:00Z' }); // 11/10 00:10 JST
+        await p.ft.q[0].fn();
+        assert.equal(p.calls.page, 0);
+    });
+    it('状態ファイルなしは即シードし、lastRunAt を保存する', async () => {
+        const p = pollerSetup({ start: '2026-11-10T06:00:00Z' });
+        await p.ft.q[0].fn();
+        assert.equal(p.calls.all, 1);
+        assert.equal(readState().lastRunAt, T('2026-11-10T06:00:00Z'));
+        await p.step();
+        assert.equal(p.calls.all, 1);
+        assert.equal(p.calls.page, 0);
+    });
+    it('取得失敗後は 5 分間隔で再試行し、lastRunAt は進まず、成功後は止まる', async () => {
+        const lastRunAt = T('2026-11-10T03:31:00Z');
+        seedState({ lastRunAt });
+        const p = pollerSetup({ start: '2026-11-10T12:30:00Z' });
+        p.failPage.on = true;
+        await p.ft.q[0].fn();
+        assert.equal(p.calls.page, 1);
+        assert.equal(readState().lastRunAt, lastRunAt);
+        for (let i = 0; i < 4; i += 1) await p.step(); // +1..+4 分: まだ再試行しない
+        assert.equal(p.calls.page, 1);
+        await p.step(); // +5 分: 再試行（失敗）
+        assert.equal(p.calls.page, 2);
+        assert.equal(readState().lastRunAt, lastRunAt);
+        p.failPage.on = false;
+        for (let i = 0; i < 4; i += 1) await p.step();
+        assert.equal(p.calls.page, 2);
+        await p.step(); // 再試行（成功）
+        assert.equal(p.calls.page, 3);
+        assert.equal(readState().lastRunAt, p.clock.t);
+        await p.step(5);
+        await p.step(5);
+        assert.equal(p.calls.page, 3);
+    });
+    it('初回シードの失敗も 5 分間隔で再試行する', async () => {
+        const p = pollerSetup({ start: '2026-11-10T06:00:00Z' });
+        p.failAll.on = true;
+        await p.ft.q[0].fn();
+        assert.equal(createStateStore(file).load().status, 'missing');
+        await p.step();
+        assert.equal(p.calls.all, 1);
+        p.failAll.on = false;
+        await p.step(4);
+        assert.equal(p.calls.all, 2);
+        assert.equal(readState().userId, '140498');
+        await p.step(5);
+        assert.equal(p.calls.all, 2);
+    });
+    it('宛先失敗で pending が残ると 5 分後に再試行し、成功済みの宛先には再投稿しない', async () => {
+        seedState({ lastRunAt: T('2026-11-10T03:31:00Z') });
+        const sent = { announce: 0, twitter: 0, misskey: 0 };
+        let twitterFails = true;
+        const p = pollerSetup({
+            start: '2026-11-10T12:30:00Z',
+            items: [vid('sm2', HOUR)],
+            destinations: {
+                announce: async () => { sent.announce += 1; },
+                twitter: async () => { if (twitterFails) throw new Error('403'); sent.twitter += 1; },
+                misskey: async () => { sent.misskey += 1; },
+            },
+        });
+        await p.ft.q[0].fn();
+        assert.deepEqual(sent, { announce: 1, twitter: 0, misskey: 1 });
+        assert.ok(readState().pending.sm2);
+        for (let i = 0; i < 4; i += 1) await p.step();
+        assert.equal(p.calls.page, 1);
+        twitterFails = false;
+        await p.step();
+        assert.deepEqual(sent, { announce: 1, twitter: 1, misskey: 1 });
+        assert.deepEqual(readState().pending, {});
+        const pages = p.calls.page;
+        await p.step(5);
+        await p.step(5);
+        assert.equal(p.calls.page, pages);
+    });
+    it('再起動後に pending が残っていれば、定刻でなくてもすぐ再試行する', async () => {
+        seedState({
+            lastRunAt: T('2026-11-10T12:31:00Z'),
+            pending: { sm2: { title: 'T', url: 'u', registeredAt: iso(T('2026-11-10T12:00:00Z')), delivered: { announce: true, twitter: true, misskey: false } } },
+        });
+        const p = pollerSetup({ start: '2026-11-10T13:00:00Z' });
+        await p.ft.q[0].fn();
+        assert.equal(p.sent.misskey.length, 1);
+        assert.equal(p.sent.announce.length, 0);
+    });
+    it('状態ファイルが破損していれば何もせず、ERROR は 1 回だけ（1 分ごとに連発しない）', async () => {
+        createStateStore(file).save({ version: 1, userId: '140498', known: [], pending: {} });
+        writeFileSync(file, '{broken');
+        const p = pollerSetup({ start: '2026-11-10T12:30:00Z' });
+        await p.ft.q[0].fn();
+        for (let i = 0; i < 10; i += 1) await p.step();
+        assert.equal(readFileSync(file, 'utf8'), '{broken');
+        assert.equal(p.calls.page + p.calls.all, 0);
+        assert.equal(p.logger.logs.error.length, 1);
+    });
+    it('実行中は次の判定をスキップする（重複実行しない）', async () => {
+        const ft = fakeTimers();
+        let calls = 0;
+        let release;
+        const gate = new Promise((r) => { release = r; });
+        const poller = createPoller({
+            inspect: () => ({ status: 'seed' }),
+            tick: async () => { calls += 1; await gate; return { status: 'ok', pending: 0 }; },
+            checkTimes: TIMES,
             logger: makeLogger(),
             ...ft,
         });
         poller.start();
-        poller.start(); // 二重 start は無視
-        assert.equal(ft.q.length, 1);
-        await ft.q[0].fn();
+        const first = ft.q[0].fn();
+        const second = ft.q[0].fn();
+        release();
+        await Promise.all([first, second]);
+        assert.equal(calls, 1);
         assert.equal(ft.q.length, 2);
-        assert.equal(ft.q[1].ms, 300000);
-        await ft.q[1].fn();
-        assert.equal(calls, 2);
-        assert.equal(maxRunning, 1);
     });
-    it('tick が例外を投げても捕捉して次を予約する', async () => {
+    it('tick が例外を投げても捕捉し、5 分後に再試行する', async () => {
         const ft = fakeTimers();
         const logger = makeLogger();
-        const poller = createPoller({ tick: async () => { throw new Error('boom'); }, intervalMs: 1, logger, ...ft });
+        const clock = { t: 0 };
+        let calls = 0;
+        const poller = createPoller({
+            inspect: () => ({ status: 'seed' }),
+            tick: async () => { calls += 1; throw new Error('boom'); },
+            checkTimes: TIMES,
+            logger,
+            now: () => clock.t,
+            ...ft,
+        });
         poller.start();
         await ft.q[0].fn();
         assert.equal(logger.logs.error.length, 1);
-        assert.equal(ft.q.length, 2);
+        assert.equal(ft.q[1].ms, 60 * 1000);
+        clock.t += 60 * 1000;
+        await ft.q[1].fn();
+        assert.equal(calls, 1);
+        clock.t += 4 * 60 * 1000;
+        await ft.q[2].fn();
+        assert.equal(calls, 2);
     });
     it('stop() で予約を取り消し、以後は予約しない', async () => {
         const ft = fakeTimers();
         let calls = 0;
-        const poller = createPoller({ tick: async () => { calls += 1; }, intervalMs: 1, logger: makeLogger(), ...ft });
+        const poller = createPoller({
+            inspect: () => ({ status: 'seed' }),
+            tick: async () => { calls += 1; return { status: 'ok', pending: 0 }; },
+            checkTimes: TIMES,
+            logger: makeLogger(),
+            ...ft,
+        });
         poller.start();
         poller.stop();
         assert.equal(ft.q[0].cleared, true);
         await ft.q[0].fn();
         assert.equal(calls, 0);
         assert.equal(ft.q.length, 1);
+    });
+});
+
+describe('状態ファイルの lastRunAt', () => {
+    it('数値は読み込め、省略も可、不正な型は corrupt', () => {
+        const store = createStateStore(file);
+        store.save({ version: 1, userId: '1', known: [], pending: {}, lastRunAt: 123 });
+        assert.equal(store.load().status, 'ok');
+        store.save({ version: 1, userId: '1', known: [], pending: {} });
+        assert.equal(store.load().status, 'ok');
+        for (const bad of ['"x"', 'null', '{}']) {
+            writeFileSync(file, `{"version":1,"userId":"1","known":[],"pending":{},"lastRunAt":${bad}}`);
+            assert.equal(store.load().status, 'corrupt', bad);
+        }
     });
 });
 
@@ -539,15 +750,20 @@ describe('loadConfig (ニコニコ設定)', () => {
         assert.deepEqual(c.niconico, {
             userId: '140498',
             postChannelId: 'p',
-            pollMinutes: 5,
+            checkTimes: [750, 1290],
             stateFile: '/h/Library/Application Support/sns-collaborator/niconico-state.json',
         });
     });
-    it('間隔・状態ファイルを上書きでき、不正な間隔は既定値', () => {
+    it('定刻・状態ファイルを上書きできる', () => {
         const env = { ...base, NICONICO_USER_ID: '1', DISCORD_POST_CHANNEL_ID: 'p', NICONICO_STATE_FILE: '/x.json' };
-        assert.equal(loadConfig({ ...env, NICONICO_POLL_MINUTES: '10' }, '/h').niconico.pollMinutes, 10);
-        assert.equal(loadConfig({ ...env, NICONICO_POLL_MINUTES: 'abc' }, '/h').niconico.pollMinutes, 5);
+        assert.deepEqual(loadConfig({ ...env, NICONICO_CHECK_TIMES: '21:30, 9:05' }, '/h').niconico.checkTimes, [545, 1290]);
         assert.equal(loadConfig(env, '/h').niconico.stateFile, '/x.json');
+    });
+    it('不正な NICONICO_CHECK_TIMES は ConfigError', () => {
+        const env = { ...base, NICONICO_USER_ID: '1', DISCORD_POST_CHANNEL_ID: 'p' };
+        for (const bad of ['25:00', '12:60', 'abc', '12:30,', '12:30,12:30', '1230']) {
+            assert.throws(() => loadConfig({ ...env, NICONICO_CHECK_TIMES: bad }, '/h'), ConfigError, bad);
+        }
     });
     it('DISCORD_POST_CHANNEL_ID が無ければ ConfigError', () => {
         assert.throws(() => loadConfig({ ...base, NICONICO_USER_ID: '1' }, '/h'), ConfigError);

@@ -11,6 +11,7 @@ import {
 } from './forwarder.js';
 import { createAnnouncer, createDestinations, createPoller, createStateStore } from './announcer.js';
 import { createHealthMonitor, parseMinutes } from './health.js';
+import { formatCheckTimes } from './schedule.js';
 import { createLogger } from './logger.js';
 import { createStats } from './stats.js';
 
@@ -92,12 +93,13 @@ async function main() {
                 stats,
             });
             createPoller({
+                inspect: announcer.inspect,
                 tick: announcer.tick,
-                intervalMs: config.niconico.pollMinutes * 60 * 1000,
+                checkTimes: config.niconico.checkTimes,
                 logger,
             }).start();
             logger.info(
-                `ニコニコ動画の新着告知を開始: userId=${config.niconico.userId} 間隔=${config.niconico.pollMinutes}分`,
+                `ニコニコ動画の新着告知を開始: userId=${config.niconico.userId} 定刻(JST)=${formatCheckTimes(config.niconico.checkTimes)}`,
             );
         }
     });

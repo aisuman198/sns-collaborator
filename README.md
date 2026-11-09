@@ -23,7 +23,7 @@ DISCORD_ALLOWED_BOT_IDS=<bot ID>,<bot ID>
 # 任意: ニコニコ動画の新着告知（NICONICO_USER_ID を設定すると有効。設定時は DISCORD_POST_CHANNEL_ID も必須）
 NICONICO_USER_ID=<ニコニコのユーザーID（数字）>
 DISCORD_POST_CHANNEL_ID=<twitter共有用チャンネルID>
-# NICONICO_POLL_MINUTES=5
+# NICONICO_CHECK_TIMES=12:30,21:30
 # NICONICO_STATE_FILE=~/Library/Application Support/sns-collaborator/niconico-state.json
 ```
 
@@ -38,7 +38,7 @@ ID は、対象チャンネルで bot 発言が除外されたときの INFO ロ
 - Misskey の上限に合わせ 3000 文字を超えたら切り詰め（末尾 `…`）
 
 #### ニコニコ動画の新着告知
-`NICONICO_USER_ID` を設定すると、同じプロセス内で投稿動画一覧を定期取得し（非公式 API `nvapi.nicovideo.jp`）、新着を次の文面で 3 か所へ告知します。未設定なら機能オフで、従来の動作は変わりません。
+`NICONICO_USER_ID` を設定すると、同じプロセス内で、毎日決まった時刻（既定 12:30 と 21:30、日本時間）に投稿動画一覧を取得し（非公式 API `nvapi.nicovideo.jp`）、新着を次の文面で 3 か所へ告知します。未設定なら機能オフで、従来の動作は変わりません。
 
 ```
 動画を投稿しました！
@@ -60,8 +60,14 @@ Discord への送信は `allowedMentions: { parse: [] }` 付きで、タイト�
 環境変数:
 - `NICONICO_USER_ID`: 任意。未設定なら機能オフ
 - `DISCORD_POST_CHANNEL_ID`: `NICONICO_USER_ID` 設定時は必須（無ければ起動時に設定エラー）
-- `NICONICO_POLL_MINUTES`: 取得間隔（分、既定 5）
+- `NICONICO_CHECK_TIMES`: 取得する定刻（JST 固定。実行マシンのタイムゾーンには依存しません）。カンマ区切りの `HH:MM`、既定 `12:30,21:30`。不正な値は起動時に設定エラー
 - `NICONICO_STATE_FILE`: 状態ファイル（既定 `~/Library/Application Support/sns-collaborator/niconico-state.json`）
+
+取得タイミング:
+- 時刻は `NICONICO_CHECK_TIMES` の定刻（JST 固定）。1 分ごとに壁時計で「直近の定刻」が状態ファイルの `lastRunAt`（最後に取得に成功した時刻）より後かを判定して実行します。長時間のタイマーは張らないため、Mac のスリープでずれません
+- スリープや停止で定刻を飛ばした場合は、復帰後に 1 回だけ実行します（複数回分飛ばしても 1 回）。定刻の間の再起動では実行しません。状態ファイルがなければ起動直後に初回シードを実行します
+- 取得に失敗した場合、または配信後に未配信が残った場合は、次の定刻を待たず 5 分間隔で再試行し、成功して未配信が空になったら止めます。`lastRunAt` は取得に成功したときだけ更新されます。再起動後に未配信が残っていれば、起動後すぐ再試行します
+- 動画が公開されてから告知されるまでの最大遅延は、次の定刻までです（既定では 21:00 公開なら 21:30 に告知、12:30 直後の公開なら 21:30 に告知）。定刻の間隔が 24 時間未満である限り、24 時間ルールで取りこぼすことはありません
 
 新着判定のルール:
 - 既知 ID 集合との差分で判定（投稿日時・ID の大小は使いません）。一度既知になった ID は削除しないため、非公開→再公開でも再告知しません
@@ -70,13 +76,13 @@ Discord への送信は `allowedMentions: { parse: [] }` 付きで、タイト�
 - `registeredAt` から 24 時間以上経った新規動画は告知せず既知に登録し WARN を出します（Mac 停止明けなど）
 - 1 回の告知対象が 4 件以上なら異常とみなし、投稿せず全て既知に登録して ID 付きの ERROR を出します
 - 異常な応答（非 200、`meta.status` 不正、項目欠落、タイムアウト 15 秒など）は「新着なし」とせず失敗扱いで、状態は変更しません。WARN を出し、連続 3 回失敗で ERROR を 1 回、回復時に INFO を 1 回
-- 配信は古い順。投稿前に状態ファイルへ未配信として保存し、宛先ごとに成功の都度保存します。失敗した宛先のみ次回再試行（取得失敗の回も再試行します）。24 時間過ぎた未配信は諦めて ERROR を出し除外します
+- 配信は古い順。投稿前に状態ファイルへ未配信として保存し、宛先ごとに成功の都度保存します。失敗した宛先のみ 5 分後に再試行（取得失敗の回も再試行します）。24 時間過ぎた未配信は諦めて ERROR を出し除外します
 
-状態ファイル（JSON。一時ファイルへ書いて rename で保存）:
+状態ファイル（JSON。一時ファイルへ書いて rename で保存。`lastRunAt` は取得に成功した最終時刻の epoch ミリ秒で、省略可）:
 ```json
-{"version":1,"userId":"140498","known":["sm1","sm2"],"pending":{"sm3":{"title":"...","url":"https://www.nicovideo.jp/watch/sm3","registeredAt":"2026-11-09T21:00:00+09:00","delivered":{"announce":true,"twitter":false,"misskey":false}}}}
+{"version":1,"userId":"140498","lastRunAt":1794225600000,"known":["sm1","sm2"],"pending":{"sm3":{"title":"...","url":"https://www.nicovideo.jp/watch/sm3","registeredAt":"2026-11-09T21:00:00+09:00","delivered":{"announce":true,"twitter":false,"misskey":false}}}}
 ```
-JSON 破損・書式不正は初回扱いにせず、上書きもせず ERROR を 1 回出してそのティックは何もしません。内容を確認して修正するか、ファイルを削除すると初回扱い（シードのみ）で再開します。
+JSON 破損・書式不正は初回扱いにせず、上書きもせず ERROR を 1 回出してその判定では何もしません（ERROR は 1 回だけで、1 分ごとの判定で連発しません）。内容を確認して修正するか、ファイルを削除すると初回扱い（シードのみ）で再開します。
 
 ### 3. アプリケーション起動
 ```sh

@@ -1,7 +1,7 @@
 // 転送判定・投稿ロジック（外部依存を注入できるようにしてテスト可能にする）
 import { homedir } from 'node:os';
 import { join } from 'node:path';
-import { parseMinutes } from './health.js';
+import { parseCheckTimes } from './schedule.js';
 import { createStats } from './stats.js';
 
 export const MAX_NOTE_LENGTH = 3000;
@@ -202,6 +202,15 @@ export class ConfigError extends Error {
     }
 }
 
+/** NICONICO_CHECK_TIMES を分配列にする。不正なら ConfigError。 */
+function parseNicoCheckTimes(value) {
+    try {
+        return parseCheckTimes(value);
+    } catch (error) {
+        throw new ConfigError(`NICONICO_CHECK_TIMES が不正です: ${error.message}`);
+    }
+}
+
 /** カンマ区切りの ID 文字列を配列にする（空白トリム・空要素除去）。 */
 export function parseIdList(value) {
     if (!value) return [];
@@ -237,7 +246,7 @@ export function loadConfig(env = process.env, home = homedir()) {
         niconico = {
             userId,
             postChannelId: env.DISCORD_POST_CHANNEL_ID,
-            pollMinutes: parseMinutes(env.NICONICO_POLL_MINUTES, 5),
+            checkTimes: parseNicoCheckTimes(env.NICONICO_CHECK_TIMES),
             stateFile:
                 env.NICONICO_STATE_FILE ||
                 join(home, 'Library', 'Application Support', 'sns-collaborator', 'niconico-state.json'),

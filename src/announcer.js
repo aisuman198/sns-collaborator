@@ -2,6 +2,7 @@
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
 import { fetchAllUserVideos, fetchUserVideosPage } from './niconico.js';
+import { latestScheduledAt } from './schedule.js';
 
 const HOUR = 60 * 60 * 1000;
 export const STALE_MS = 24 * HOUR; // これ以上古い動画は告知しない
@@ -83,6 +84,7 @@ function validateState(s) {
     if (typeof s.userId !== 'string' || s.userId === '') return 'userId が不正です';
     if (!Array.isArray(s.known) || s.known.some((id) => typeof id !== 'string')) return 'known が不正です';
     if (!s.pending || typeof s.pending !== 'object' || Array.isArray(s.pending)) return 'pending が不正です';
+    if (s.lastRunAt !== undefined && !Number.isFinite(s.lastRunAt)) return 'lastRunAt が不正です';
     for (const [id, p] of Object.entries(s.pending)) {
         if (!p || typeof p !== 'object') return `pending[${id}] が不正です`;
         if (typeof p.title !== 'string' || typeof p.url !== 'string') return `pending[${id}] の title/url が不正です`;
@@ -254,13 +256,33 @@ export function createAnnouncer({
         const all = await fetchAll();
         // 未来日時（公開予約中）の動画は既知にしない（通常ポーリングと同じ扱い。公開後に告知される）
         const items = all.filter((v) => v.registeredAtMs <= t);
-        store.save({ version: 1, userId, known: items.map((v) => v.id), pending: {} });
+        store.save({ version: 1, userId, known: items.map((v) => v.id), pending: {}, lastRunAt: now() });
         logger.info(
             `ニコニコ動画の初回シード完了: ${items.length} 件を既知に登録しました（投稿なし）` +
                 (all.length > items.length ? ` / 公開前の ${all.length - items.length} 件は除外` : ''),
         );
     }
 
+    /**
+     * 状態ファイルの要約（実行判定用）。
+     * { status: 'corrupt' } | { status: 'seed' } | { status: 'ready', lastRunAt: number|null, hasPending: boolean }
+     */
+    function inspect() {
+        const loaded = store.load();
+        if (loaded.status === 'corrupt') return { status: 'corrupt' };
+        if (loaded.status === 'missing' || loaded.state.userId !== userId) return { status: 'seed' };
+        return {
+            status: 'ready',
+            lastRunAt: loaded.state.lastRunAt ?? null,
+            hasPending: Object.keys(loaded.state.pending).length > 0,
+        };
+    }
+
+    /**
+     * 取得・新着判定・配信の本体（実行するかどうかの判定はポーラー側）。
+     * 戻り値: { status: 'ok' | 'failed' | 'corrupt', pending: 未配信の動画数 }
+     * lastRunAt は取得が成功したときだけ更新する。
+     */
     async function tick() {
         const loaded = store.load();
         if (loaded.status === 'corrupt') {
@@ -268,7 +290,7 @@ export function createAnnouncer({
                 corruptReported = true;
                 logger.error(`ニコニコ動画の状態ファイルが不正なため何もしません (${store.file}): ${loaded.reason}`);
             }
-            return;
+            return { status: 'corrupt', pending: 0 };
         }
         corruptReported = false;
 
@@ -276,63 +298,99 @@ export function createAnnouncer({
             try {
                 await seed();
                 recordFetchSuccess();
+                return { status: 'ok', pending: 0 };
             } catch (error) {
                 recordFetchFailure(error);
+                return { status: 'failed', pending: 0 };
             }
-            return;
         }
 
         const state = loaded.state;
+        let items = null;
         try {
-            const { items } = await fetchPage(1, POLL_PAGE_SIZE);
-            recordFetchSuccess();
-            if (collectNew(state, items)) store.save(state);
+            ({ items } = await fetchPage(1, POLL_PAGE_SIZE));
         } catch (error) {
             recordFetchFailure(error);
         }
+        if (items !== null) {
+            recordFetchSuccess();
+            collectNew(state, items);
+            state.lastRunAt = now();
+            store.save(state);
+        }
         await deliverPending(state); // 取得失敗でも pending の再試行は行う
+        return { status: items !== null ? 'ok' : 'failed', pending: Object.keys(state.pending).length };
     }
 
-    return { tick };
+    return { tick, inspect };
 }
 
 // ---- ポーラー ----
 
+export const CHECK_INTERVAL_MS = 60 * 1000; // 実行判定の間隔
+export const RETRY_INTERVAL_MS = 5 * 60 * 1000; // 失敗・未配信残り時の再試行間隔
+
 /**
- * 完了後に次を予約する setTimeout 方式（重複実行しない）。例外は全て捕捉する。
+ * 1 分ごとに壁時計で実行判定するポーラー（長時間の setTimeout は張らない。スリープでずれるため）。
+ * 判定: 再試行待ちなら retryAt まで待つ。そうでなければ
+ *   corrupt / 初回(seed) / 未配信が残っている → 実行、
+ *   それ以外は「直近の定刻 > lastRunAt」のときだけ実行（飛ばした回は復帰後に 1 回だけ）。
+ * 実行後、失敗または未配信が残れば RETRY_INTERVAL_MS 後に再実行し、成功して pending が空なら止める。
+ * 実行中は判定をスキップし、例外は全て捕捉する。
  */
 export function createPoller({
+    inspect,
     tick,
-    intervalMs,
+    checkTimes,
     logger,
+    now = Date.now,
+    checkIntervalMs = CHECK_INTERVAL_MS,
+    retryIntervalMs = RETRY_INTERVAL_MS,
     setTimeoutFn = setTimeout,
     clearTimeoutFn = clearTimeout,
 }) {
     let timer = null;
     let running = false;
     let stopped = true;
+    let retryAt = null; // in-memory の再試行時刻
+
+    function isDue() {
+        const t = now();
+        if (retryAt !== null) return t >= retryAt;
+        const info = inspect();
+        if (info.status !== 'ready' || info.hasPending) return true;
+        return latestScheduledAt(t, checkTimes) > (info.lastRunAt ?? -Infinity);
+    }
 
     function schedule(delay) {
         if (stopped) return;
-        timer = setTimeoutFn(run, delay);
+        timer = setTimeoutFn(check, delay);
         timer?.unref?.();
     }
 
-    async function run() {
+    async function check() {
         timer = null;
         if (stopped || running) return;
         running = true;
         try {
-            await tick();
+            if (isDue()) {
+                const result = await tick();
+                retryAt =
+                    result.status === 'failed' || (result.status === 'ok' && result.pending > 0)
+                        ? now() + retryIntervalMs
+                        : null;
+            }
         } catch (error) {
             logger.error('ニコニコ動画のポーリングで予期しないエラー:', error);
+            retryAt = now() + retryIntervalMs;
         } finally {
             running = false;
-            schedule(intervalMs);
+            schedule(checkIntervalMs);
         }
     }
 
     return {
+        check,
         start() {
             if (!stopped) return;
             stopped = false;
