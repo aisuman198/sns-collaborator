@@ -3,6 +3,7 @@ import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from '
 import { dirname } from 'node:path';
 import { fetchAllUserVideos, fetchUserVideosPage } from './niconico.js';
 import { latestScheduledAt } from './schedule.js';
+import { MAX_BUTTON_URL_LENGTH, TWEET_INTENT_URL, buildShareUrl, sendShare } from './share.js';
 
 const HOUR = 60 * 60 * 1000;
 export const STALE_MS = 24 * HOUR; // これ以上古い動画は告知しない
@@ -16,25 +17,14 @@ export function buildAnnouncementText(video) {
     return `動画を投稿しました！\n${video.title}\nhttps://www.nicovideo.jp/watch/${video.id}`;
 }
 
-export const TWEET_INTENT_URL = 'https://twitter.com/intent/tweet?text=';
-export const MAX_BUTTON_URL_LENGTH = 512; // Discord のリンクボタン URL の上限
+export { TWEET_INTENT_URL, MAX_BUTTON_URL_LENGTH };
 
 /**
- * ツイート投稿用の intent URL を作る。URL 全体が 512 文字以下になるよう、
- * ツイート文の「タイトルだけ」を末尾 … 付きで切り詰める（1 行目と動画 URL の行は残す）。
- * 切り詰めはコードポイント単位（サロゲートペアを分断しない）で、encode 後の長さで判定する。
+ * 動画告知のツイート用 intent URL を作る（切り詰めは share.js の buildShareUrl。
+ * 3 行の告知文では中間行 = タイトルだけが末尾 … 付きで切り詰められる）。
  */
 export function buildTweetUrl(video) {
-    const make = (title) => TWEET_INTENT_URL + encodeURIComponent(buildAnnouncementText({ ...video, title }));
-    let url = make(video.title);
-    if (url.length <= MAX_BUTTON_URL_LENGTH) return url;
-    const chars = Array.from(video.title);
-    while (chars.length > 0) {
-        chars.pop();
-        url = make(`${chars.join('')}…`);
-        if (url.length <= MAX_BUTTON_URL_LENGTH) return url;
-    }
-    return make('…');
+    return buildShareUrl(buildAnnouncementText(video));
 }
 
 // ---- 状態ファイル ----
@@ -109,23 +99,7 @@ export function createDestinations({ discordClient, misskeyClient, announceChann
         }
         await channel.send({ content: text, allowedMentions: { parse: [] } });
     };
-    const toTweetChannel = (channelId) => async (text, video) => {
-        const channel = await discordClient.channels.fetch(channelId);
-        if (!channel || typeof channel.send !== 'function') {
-            throw new Error(`Discord チャンネルに送信できません: id=${channelId}`);
-        }
-        await channel.send({
-            content: '',
-            embeds: [{ description: text }],
-            components: [
-                {
-                    type: 1,
-                    components: [{ type: 2, style: 5, label: 'ツイートする', url: buildTweetUrl(video) }],
-                },
-            ],
-            allowedMentions: { parse: [] },
-        });
-    };
+    const toTweetChannel = (channelId) => (text) => sendShare(discordClient, channelId, text);
     return {
         announce: toChannel(announceChannelId),
         twitter: toTweetChannel(twitterChannelId),

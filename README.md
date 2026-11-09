@@ -20,9 +20,12 @@ MISSKEY_API_TOKEN=<MISSKEY_API_TOKEN>
 # 任意: 転送を許可する bot のユーザー ID（カンマ区切り）
 DISCORD_ALLOWED_BOT_IDS=<bot ID>,<bot ID>
 
+# 任意: twitter共有用チャンネル。設定すると、許可 bot（Streamcord など）のライブ配信告知を
+# このチャンネルへ「ツイートする」ボタン付きで投稿する。ニコニコ動画の新着告知を使うときは必須
+DISCORD_POST_CHANNEL_ID=<twitter共有用チャンネルID>
+
 # 任意: ニコニコ動画の新着告知（NICONICO_USER_ID を設定すると有効。設定時は DISCORD_POST_CHANNEL_ID も必須）
 NICONICO_USER_ID=<ニコニコのユーザーID（数字）>
-DISCORD_POST_CHANNEL_ID=<twitter共有用チャンネルID>
 # NICONICO_CHECK_TIMES=12:30,21:30
 # NICONICO_STATE_FILE=~/Library/Application Support/sns-collaborator/niconico-state.json
 ```
@@ -30,6 +33,14 @@ DISCORD_POST_CHANNEL_ID=<twitter共有用チャンネルID>
 #### 通知 bot（Streamcord など）の投稿を転送する
 既定では bot の発言は転送されません。Streamcord などの通知 bot の投稿を転送したい場合は `DISCORD_ALLOWED_BOT_IDS` にその bot のユーザー ID をカンマ区切りで指定します（空白は無視、自分自身の発言は常に除外）。
 ID は、対象チャンネルで bot 発言が除外されたときの INFO ログ（`bot 発言を除外しました: author=... id=...`）か、Discord の開発者モードを有効にして bot のユーザーを右クリック →「ユーザー ID をコピー」で取得できます。
+
+#### ライブ配信告知の twitter共有用チャンネルへの投稿
+`DISCORD_POST_CHANNEL_ID` を設定すると、`DISCORD_ALLOWED_BOT_IDS` に含まれる bot（Streamcord など）が配信告知チャンネルに投稿した告知を、Misskey への転送と同時に twitter共有用チャンネルへも投稿します。未設定なら何もしません（従来どおり Misskey 転送のみ）。
+- 対象は許可 bot の投稿のみです。人の手動投稿・許可外 bot・bot 自身の投稿は共有しません（動画告知が二重に共有されることもありません）
+- 形式は動画告知と同じです。`content` は空、本文（下記の組み立てルールの結果）を埋め込みの description に入れ、「ツイートする」リンクボタン（`https://twitter.com/intent/tweet?text=<本文を encodeURIComponent したもの>`）を付けます。`allowedMentions: { parse: [] }` 付きです
+- ボタン URL は Discord の上限 512 文字に収めるため、長い場合は本文の最初の行と最後の行（URL）を残し、中間の行だけを末尾 `…` で切り詰めます（行が 2 行以下なら末尾側）。埋め込みの本文は切り詰めません
+- 本文が確定した時点（messageCreate、または embed が後から付いた messageUpdate）で 1 回だけ投稿します。本文が空でスキップしたときは投稿しません
+- Misskey 転送とは独立しています。どちらかが失敗してももう一方は止まらず、共有済みは別に追跡するため、Misskey の再試行で共有が重複投稿されることも、共有の失敗で Misskey が再投稿されることもありません。成功は INFO、失敗は ERROR をログに出し、heartbeat の `shareOk` / `shareFail` に集計します
 
 #### 投稿本文の組み立てルール
 - `message.content` から `@everyone` / `@here`、メンション（`<@123>` `<@!123>` `<@&123>`）、チャンネル参照（`<#123>`）を除去し、カスタム絵文字は `:name:` に変換、前後の空白を整理し、空行は詰める
@@ -133,7 +144,7 @@ heartbeat（ws 状態・統計など）は out.log には出さず、**上書き
 
 ```
 $ cat ~/Library/Logs/sns-collaborator/heartbeat.log
-[2026-11-01T01:23:45.000Z] heartbeat ws=READY ping=45ms uptime=4d0h12m3s received=120 targetChannel=8 botSkipped=1 emptySkipped=0 forwardOk=7 forwardFail=0 niconicoOk=288 niconicoFail=0 niconicoAnnounced=1 lastReceived=2026-11-01T01:23:45.000Z
+[2026-11-01T01:23:45.000Z] heartbeat ws=READY ping=45ms uptime=4d0h12m3s received=120 targetChannel=8 botSkipped=1 emptySkipped=0 forwardOk=7 forwardFail=0 shareOk=3 shareFail=0 niconicoOk=288 niconicoFail=0 niconicoAnnounced=1 lastReceived=2026-11-01T01:23:45.000Z
 ```
 
 ファイルの更新時刻（`ls -l`）が 2 分以上古ければ、プロセス停止の疑いがあります。書き込みに失敗してもプロセスは落ちず、ERROR を 1 回だけ出力します（回復時に INFO を 1 回）。
@@ -143,6 +154,7 @@ heartbeat の読み方:
 - `ws=READY` なのに `received` が 0 のまま増えない: イベントがそもそも届いていない（Intent・Bot の参加サーバー・権限を確認）
 - `received` は増えるが `targetChannel=0`: `DISCORD_CHANNEL_ID` の誤りの可能性
 - `targetChannel` は増えるが `forwardOk` が増えない: `botSkipped`（bot 発言）か `forwardFail`（Misskey 側の失敗）を確認
+- `shareOk` / `shareFail`: twitter共有用チャンネルへの投稿の成功数・失敗数（`DISCORD_POST_CHANNEL_ID` 未設定なら 0 のまま）。`shareFail` が増える場合はチャンネル ID・bot の送信権限を確認
 - `niconicoOk` / `niconicoFail` / `niconicoAnnounced`: ニコニコ動画の取得成功数・失敗数・告知完了数（機能オフなら 0 のまま）。`niconicoFail` だけ増え続ける場合は nvapi 側の変更・障害を疑う
 - `lastReceived` で最後にメッセージを受けた時刻が分かる
 

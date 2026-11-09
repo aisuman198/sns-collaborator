@@ -8,6 +8,8 @@ export function createStats() {
         emptySkipped: 0, // 転送する本文が空でスキップした数
         forwardSucceeded: 0,
         forwardFailed: 0,
+        shareSucceeded: 0, // twitter共有用チャンネルへの投稿成功数
+        shareFailed: 0, // 同 失敗数
         niconicoFetchOk: 0, // ニコニコ動画の取得成功数
         niconicoFetchFailed: 0, // ニコニコ動画の取得失敗数
         niconicoAnnounced: 0, // 全宛先へ告知完了した動画数

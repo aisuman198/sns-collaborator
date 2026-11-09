@@ -14,6 +14,7 @@ import { createHealthMonitor, parseMinutes } from './health.js';
 import { formatCheckTimes } from './schedule.js';
 import { createLogger } from './logger.js';
 import { createStats } from './stats.js';
+import { sendShare } from './share.js';
 
 const logger = createLogger();
 
@@ -110,6 +111,10 @@ async function main() {
         allowedBotIds: config.allowedBotIds,
         selfId: () => discordClient.user?.id,
         tracker,
+        // DISCORD_POST_CHANNEL_ID 設定時のみ、許可 bot の告知を twitter共有用チャンネルへ投稿する
+        share: config.postChannelId
+            ? (text) => sendShare(discordClient, config.postChannelId, text)
+            : null,
     };
     discordClient.on(
         Events.MessageCreate,
