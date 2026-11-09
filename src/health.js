@@ -92,7 +92,8 @@ export function createHealthMonitor({
             `[${new Date(t).toISOString()}] heartbeat ws=${status.ready ? 'READY' : 'NOT_READY'} ping=${status.ping}ms ` +
                 `uptime=${formatDuration(status.uptimeMs)} ` +
                 `received=${stats.received} targetChannel=${stats.targetChannel} botSkipped=${stats.botSkipped} emptySkipped=${stats.emptySkipped} ` +
-                `forwardOk=${stats.forwardSucceeded} forwardFail=${stats.forwardFailed} lastReceived=${last}`;
+                `forwardOk=${stats.forwardSucceeded} forwardFail=${stats.forwardFailed} ` +
+                `niconicoOk=${stats.niconicoFetchOk ?? 0} niconicoFail=${stats.niconicoFetchFailed ?? 0} niconicoAnnounced=${stats.niconicoAnnounced ?? 0} lastReceived=${last}`;
         try {
             writeStatus(line);
             if (writeFailing) {

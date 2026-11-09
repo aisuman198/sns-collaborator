@@ -9,7 +9,9 @@ import {
     createMessageUpdateHandler,
     loadConfig,
 } from './forwarder.js';
+import { createAnnouncer, createDestinations, createPoller, createStateStore } from './announcer.js';
 import { createHealthMonitor, parseMinutes } from './health.js';
+import { formatCheckTimes } from './schedule.js';
 import { createLogger } from './logger.js';
 import { createStats } from './stats.js';
 
@@ -73,6 +75,31 @@ async function main() {
             logger.error(
                 `監視チャンネルの取得に失敗しました (ID違い・権限不足・未参加の可能性): id=${config.channelId}`,
                 error,
+            );
+        }
+
+        // ニコニコ動画の新着告知（NICONICO_USER_ID 設定時のみ。ClientReady は once なので二重起動しない）
+        if (config.niconico) {
+            const announcer = createAnnouncer({
+                userId: config.niconico.userId,
+                store: createStateStore(config.niconico.stateFile),
+                destinations: createDestinations({
+                    discordClient: readyClient,
+                    misskeyClient,
+                    announceChannelId: config.channelId,
+                    twitterChannelId: config.niconico.postChannelId,
+                }),
+                logger,
+                stats,
+            });
+            createPoller({
+                inspect: announcer.inspect,
+                tick: announcer.tick,
+                checkTimes: config.niconico.checkTimes,
+                logger,
+            }).start();
+            logger.info(
+                `ニコニコ動画の新着告知を開始: userId=${config.niconico.userId} 定刻(JST)=${formatCheckTimes(config.niconico.checkTimes)}`,
             );
         }
     });
