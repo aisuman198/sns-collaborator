@@ -3,7 +3,9 @@ import assert from 'node:assert/strict';
 import {
     NiconicoError,
     fetchAllUserVideos,
+    buildSummaryLine,
     fetchUserVideosPage,
+    fetchVideoDescription,
     normalizeItem,
 } from '../src/niconico.js';
 
@@ -27,6 +29,82 @@ describe('normalizeItem', () => {
         assert.throws(() => normalizeItem({ essential: { id: 'a', registeredAt: '2026-01-01T00:00:00Z' } }), NiconicoError);
         assert.throws(() => normalizeItem({ essential: { id: 'a', title: 't' } }), NiconicoError);
         assert.throws(() => normalizeItem(item('a', 'not-a-date')), NiconicoError);
+    });
+});
+
+describe('normalizeItem shortDescription', () => {
+    it('文字列ならそのまま、でなければ空文字', () => {
+        const withDesc = (shortDescription) => ({ essential: { ...item('sm1').essential, shortDescription } });
+        assert.equal(normalizeItem(withDesc('概要。')).shortDescription, '概要。');
+        assert.equal(normalizeItem(withDesc(123)).shortDescription, '');
+        assert.equal(normalizeItem(withDesc(null)).shortDescription, '');
+        assert.equal(normalizeItem(item('sm1')).shortDescription, '');
+    });
+});
+
+describe('buildSummaryLine', () => {
+    it('最初の句点まで（含む）', () => {
+        assert.equal(buildSummaryLine('一文目。二文目。'), '一文目。');
+    });
+    it('句点が無ければ全文', () => {
+        assert.equal(buildSummaryLine('句点なし！'), '句点なし！');
+    });
+    it('空白・改行を正規化して trim する', () => {
+        assert.equal(buildSummaryLine('  あ\n\n い\t う。え  '), 'あ い う。');
+        assert.equal(buildSummaryLine('a\r\nb'), 'a b');
+    });
+    it('空・空白のみ・非文字列は空文字', () => {
+        assert.equal(buildSummaryLine(''), '');
+        assert.equal(buildSummaryLine(' \n '), '');
+        assert.equal(buildSummaryLine(undefined), '');
+    });
+    it('100 字超は 100 字に切って … を付ける（ちょうど 100 字は切らない）', () => {
+        assert.equal(buildSummaryLine('あ'.repeat(100) + '。'), 'あ'.repeat(100) + '…');
+        assert.equal(buildSummaryLine('あ'.repeat(150)), 'あ'.repeat(100) + '…');
+        assert.equal(buildSummaryLine('あ'.repeat(99) + '。'), 'あ'.repeat(99) + '。');
+    });
+    it('サロゲートペアを分断しない', () => {
+        const out = buildSummaryLine('😀'.repeat(120));
+        assert.equal(out, '😀'.repeat(100) + '…');
+        assert.equal(Array.from(out).length, 101);
+    });
+});
+
+describe('fetchVideoDescription', () => {
+    const xml = (inner, status = 'ok') =>
+        `<?xml version="1.0" encoding="UTF-8"?><nicovideo_thumb_response status="${status}"><thumb><video_id>sm1</video_id>${inner}</thumb></nicovideo_thumb_response>`;
+    const textRes = (body, status = 200) => ({ status, text: async () => body });
+
+    it('URL・ヘッダ・signal を付けて説明文を返す', async () => {
+        const calls = [];
+        const fetchFn = async (url, opts) => {
+            calls.push({ url, opts });
+            return textRes(xml('<description>こんにちは。</description>'));
+        };
+        assert.equal(await fetchVideoDescription({ videoId: 'sm1', fetchFn }), 'こんにちは。');
+        assert.equal(calls[0].url, 'https://ext.nicovideo.jp/api/getthumbinfo/sm1');
+        assert.equal(calls[0].opts.headers['User-Agent'], 'sns-collaborator');
+        assert.ok(calls[0].opts.signal instanceof AbortSignal);
+    });
+    it('XML 実体参照をデコードする', async () => {
+        const fetchFn = async () =>
+            textRes(xml('<description>A&amp;B &lt;x&gt; &quot;q&quot; &apos;s&apos; &#12354;&#x3044; &amp;amp;</description>'));
+        assert.equal(await fetchVideoDescription({ videoId: 'sm1', fetchFn }), `A&B <x> "q" 's' あい &amp;`);
+    });
+    it('空要素は空文字', async () => {
+        assert.equal(await fetchVideoDescription({ videoId: 'sm1', fetchFn: async () => textRes(xml('<description/>')) }), '');
+        assert.equal(await fetchVideoDescription({ videoId: 'sm1', fetchFn: async () => textRes(xml('<description></description>')) }), '');
+    });
+    it('非 200・status fail・description なし・例外は NiconicoError', async () => {
+        const bad = [
+            async () => textRes('', 503),
+            async () => textRes('<nicovideo_thumb_response status="fail"><error><code>DELETED</code></error></nicovideo_thumb_response>'),
+            async () => textRes(xml('<title>t</title>')),
+            async () => { throw new Error('network down'); },
+        ];
+        for (const fetchFn of bad) {
+            await assert.rejects(fetchVideoDescription({ videoId: 'sm1', fetchFn }), NiconicoError);
+        }
     });
 });
 
