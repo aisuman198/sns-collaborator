@@ -6,6 +6,7 @@ import { join } from 'node:path';
 import {
     DESTINATIONS,
     buildAnnouncementText,
+    buildShareText,
     buildTweetUrl,
     createAnnouncer,
     createDestinations,
@@ -41,7 +42,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-function setup({ fetchPage, fetchAll, destinations, now = () => NOW } = {}) {
+function setup({ fetchPage, fetchAll, destinations, fetchDescription, now = () => NOW } = {}) {
     const logger = makeLogger();
     const stats = createStats();
     const sent = { announce: [], twitter: [], misskey: [] };
@@ -56,6 +57,7 @@ function setup({ fetchPage, fetchAll, destinations, now = () => NOW } = {}) {
         now,
         fetchPage: fetchPage ?? (async () => ({ items: [] })),
         fetchAll: fetchAll ?? (async () => []),
+        fetchDescription: fetchDescription ?? (async () => ''),
     });
     return { announcer, logger, stats, sent, store };
 }
@@ -794,5 +796,120 @@ describe('heartbeat への統計出力', () => {
         });
         monitor.tick();
         assert.match(lines[0], /niconicoOk=3 niconicoFail=1 niconicoAnnounced=2 lastReceived=/);
+    });
+});
+
+describe('buildShareText', () => {
+    it('要約行をタイトルと URL の間に入れる', () => {
+        assert.equal(
+            buildShareText({ id: 'sm9', title: 'テスト', summary: '要約です。' }),
+            '動画を投稿しました！\nテスト\n要約です。\nhttps://www.nicovideo.jp/watch/sm9',
+        );
+    });
+    it('要約が空・未指定なら 3 行の告知文と同じ', () => {
+        const base = { id: 'sm9', title: 'テスト' };
+        assert.equal(buildShareText({ ...base, summary: '' }), buildAnnouncementText(base));
+        assert.equal(buildShareText(base), buildAnnouncementText(base));
+    });
+    it('buildTweetUrl は要約入り文面ベースで、長いときも 512 文字以下で先頭行と URL を残す', () => {
+        const video = { id: 'sm9', title: 'T', summary: '要約です。' };
+        assert.equal(decodeURIComponent(buildTweetUrl(video).split('text=')[1]), buildShareText(video));
+        const long = { id: 'sm9', title: 'あ'.repeat(100), summary: 'い'.repeat(100) };
+        const url = buildTweetUrl(long);
+        assert.ok(url.length <= 512);
+        const lines = decodeURIComponent(url.split('text=')[1]).split('\n');
+        assert.equal(lines[0], '動画を投稿しました！');
+        assert.equal(lines.at(-1), 'https://www.nicovideo.jp/watch/sm9');
+    });
+});
+
+describe('要約行つき告知', () => {
+    it('announce は従来文面、twitter / misskey は要約入り。summary を保存し video にも渡す', async () => {
+        seedState();
+        const videos = [];
+        const sent = { announce: [], twitter: [], misskey: [] };
+        const dests = Object.fromEntries(
+            DESTINATIONS.map((d) => [d, async (t, v) => { sent[d].push(t); videos.push(v); }]),
+        );
+        const t = setup({
+            fetchPage: async () => ({ items: [vid('sm2', HOUR)] }),
+            destinations: dests,
+            fetchDescription: async (id) => { assert.equal(id, 'sm2'); return '一文目。\n二文目。'; },
+        });
+        await t.announcer.tick();
+        const base = '動画を投稿しました！\ntitle-sm2\n';
+        const url = 'https://www.nicovideo.jp/watch/sm2';
+        assert.deepEqual(sent.announce, [`${base}${url}`]);
+        assert.deepEqual(sent.twitter, [`${base}一文目。\n${url}`]);
+        assert.deepEqual(sent.misskey, [`${base}一文目。\n${url}`]);
+        assert.ok(videos.every((v) => v.summary === '一文目。' && v.id === 'sm2'));
+    });
+    it('配信前の状態ファイルに summary が保存される', async () => {
+        seedState();
+        const t = setup({
+            fetchPage: async () => ({ items: [vid('sm2', HOUR)] }),
+            destinations: { announce: async () => { throw new Error('x'); }, twitter: async () => { throw new Error('x'); }, misskey: async () => { throw new Error('x'); } },
+            fetchDescription: async () => '保存される。',
+        });
+        await t.announcer.tick();
+        assert.equal(readState().pending.sm2.summary, '保存される。');
+    });
+    it('要約が空なら twitter / misskey も 3 行', async () => {
+        seedState();
+        const t = setup({ fetchPage: async () => ({ items: [vid('sm2', HOUR)] }) });
+        await t.announcer.tick();
+        const text = '動画を投稿しました！\ntitle-sm2\nhttps://www.nicovideo.jp/watch/sm2';
+        assert.deepEqual(t.sent, { announce: [text], twitter: [text], misskey: [text] });
+    });
+    it('取得失敗は WARN を出し、一覧の概要に『。』があればそれで代替する', async () => {
+        seedState();
+        const t = setup({
+            fetchPage: async () => ({ items: [{ ...vid('sm2', HOUR), shortDescription: '代替です。続きが途中で切' }] }),
+            fetchDescription: async () => { throw new Error('boom'); },
+        });
+        const r = await t.announcer.tick();
+        assert.equal(r.status, 'ok');
+        assert.equal(t.logger.logs.warn.length, 1);
+        assert.match(t.logger.logs.warn[0], /sm2.*boom/);
+        assert.match(t.sent.twitter[0], /\n代替です。\n/);
+        assert.doesNotMatch(t.sent.announce[0], /代替です/);
+    });
+    it('取得失敗で概要に『。』が無ければ要約なし（配信は止めない）', async () => {
+        seedState();
+        const t = setup({
+            fetchPage: async () => ({ items: [{ ...vid('sm2', HOUR), shortDescription: '句点なしで途中' }] }),
+            fetchDescription: async () => { throw new Error('boom'); },
+        });
+        await t.announcer.tick();
+        const text = '動画を投稿しました！\ntitle-sm2\nhttps://www.nicovideo.jp/watch/sm2';
+        assert.deepEqual(t.sent.misskey, [text]);
+        assert.equal(readState().pending.sm2, undefined);
+    });
+    it('summary の無い旧状態ファイルの pending も取得して配信される', async () => {
+        seedState({
+            pending: { sm2: { title: 'T', url: 'u', registeredAt: iso(NOW - HOUR), delivered: undelivered() } },
+        });
+        assert.equal(createStateStore(file).load().status, 'ok');
+        const t = setup({ fetchDescription: async () => '旧状態。' });
+        await t.announcer.tick();
+        assert.deepEqual(t.sent.twitter, ['動画を投稿しました！\nT\n旧状態。\nhttps://www.nicovideo.jp/watch/sm2']);
+        assert.deepEqual(t.sent.announce, ['動画を投稿しました！\nT\nhttps://www.nicovideo.jp/watch/sm2']);
+    });
+    it('旧状態ファイルで取得に失敗しても空の要約で配信する', async () => {
+        seedState({
+            pending: { sm2: { title: 'T', url: 'u', registeredAt: iso(NOW - HOUR), delivered: undelivered() } },
+        });
+        const t = setup({ fetchDescription: async () => { throw new Error('down'); } });
+        await t.announcer.tick();
+        assert.deepEqual(t.sent.misskey, ['動画を投稿しました！\nT\nhttps://www.nicovideo.jp/watch/sm2']);
+        assert.equal(t.logger.logs.warn.length, 1);
+    });
+    it('summary が文字列以外の状態ファイルは corrupt', () => {
+        const store = seedState();
+        writeFileSync(
+            file,
+            JSON.stringify({ version: 1, userId: '1', known: [], pending: { a: { title: 't', url: 'u', registeredAt: iso(NOW), delivered: {}, summary: 1 } } }),
+        );
+        assert.equal(store.load().status, 'corrupt');
     });
 });
