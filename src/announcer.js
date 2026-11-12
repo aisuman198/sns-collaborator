@@ -1,7 +1,7 @@
 // ニコニコ動画の新着告知（新着判定・文面・配信・状態保存・ポーラー）
 import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { dirname } from 'node:path';
-import { fetchAllUserVideos, fetchUserVideosPage } from './niconico.js';
+import { buildSummaryLine, fetchAllUserVideos, fetchUserVideosPage, fetchVideoDescription } from './niconico.js';
 import { latestScheduledAt } from './schedule.js';
 import { MAX_BUTTON_URL_LENGTH, TWEET_INTENT_URL, buildShareUrl, sendShare } from './share.js';
 
@@ -12,19 +12,27 @@ export const ANOMALY_THRESHOLD = 4; // 1 回の告知対象がこの件数以上
 export const FAILURE_ALERT_THRESHOLD = 3; // 連続取得失敗で ERROR を出す回数
 export const DESTINATIONS = ['announce', 'twitter', 'misskey'];
 
-/** 告知文（3 宛先共通）。 */
+/** 配信告知チャンネル宛ての告知文（3 行）。 */
 export function buildAnnouncementText(video) {
     return `動画を投稿しました！\n${video.title}\nhttps://www.nicovideo.jp/watch/${video.id}`;
+}
+
+/**
+ * twitter / misskey 宛ての文面。タイトルの次に要約行を入れる（要約が空なら 3 行の告知文と同じ）。
+ */
+export function buildShareText(video) {
+    if (!video.summary) return buildAnnouncementText(video);
+    return `動画を投稿しました！\n${video.title}\n${video.summary}\nhttps://www.nicovideo.jp/watch/${video.id}`;
 }
 
 export { TWEET_INTENT_URL, MAX_BUTTON_URL_LENGTH };
 
 /**
  * 動画告知のツイート用 intent URL を作る（切り詰めは share.js の buildShareUrl。
- * 3 行の告知文では中間行 = タイトルだけが末尾 … 付きで切り詰められる）。
+ * 中間行（タイトル・要約行）が末尾 … 付きで切り詰められる）。
  */
 export function buildTweetUrl(video) {
-    return buildShareUrl(buildAnnouncementText(video));
+    return buildShareUrl(buildShareText(video));
 }
 
 // ---- 状態ファイル ----
@@ -77,6 +85,7 @@ function validateState(s) {
     if (s.lastRunAt !== undefined && !Number.isFinite(s.lastRunAt)) return 'lastRunAt が不正です';
     for (const [id, p] of Object.entries(s.pending)) {
         if (!p || typeof p !== 'object') return `pending[${id}] が不正です`;
+        if (p.summary !== undefined && typeof p.summary !== 'string') return `pending[${id}].summary が不正です`;
         if (typeof p.title !== 'string' || typeof p.url !== 'string') return `pending[${id}] の title/url が不正です`;
         if (!Number.isFinite(Date.parse(p.registeredAt))) return `pending[${id}].registeredAt が不正です`;
         if (!p.delivered || typeof p.delivered !== 'object') return `pending[${id}].delivered が不正です`;
@@ -87,7 +96,7 @@ function validateState(s) {
 // ---- 配信先 ----
 
 /**
- * 実配信先を組み立てる。各値は (text, video) => Promise<void>（video は { id, title }）。
+ * 実配信先を組み立てる。各値は (text, video) => Promise<void>（video は { id, title, summary }）。
  * Discord は allowedMentions: { parse: [] } で @everyone 等の通知を無効化する。
  * twitter 宛ては既存のライブ配信投稿と同じ形式（content 空・embed の description・「ツイートする」リンクボタン）。
  */
@@ -128,7 +137,9 @@ export function createAnnouncer({
     now = Date.now,
     fetchPage = (page, pageSize) => fetchUserVideosPage({ userId, page, pageSize }),
     fetchAll = () => fetchAllUserVideos({ userId }),
+    fetchDescription = (videoId) => fetchVideoDescription({ videoId }),
 }) {
+    const shortDescriptions = new Map(); // 取得失敗時のフォールバック用（保存しない）
     let consecutiveFailures = 0;
     let alerted = false;
     let corruptReported = false;
@@ -178,6 +189,7 @@ export function createAnnouncer({
         fresh.sort((a, b) => a.registeredAtMs - b.registeredAtMs);
         for (const v of fresh) {
             state.known.push(v.id);
+            shortDescriptions.set(v.id, v.shortDescription ?? '');
             state.pending[v.id] = {
                 title: v.title,
                 url: `https://www.nicovideo.jp/watch/${v.id}`,
@@ -187,6 +199,23 @@ export function createAnnouncer({
             changed = true;
         }
         return changed;
+    }
+
+    /**
+     * summary を持たない pending に要約行を埋める（保存は呼び出し側）。
+     * 説明文の取得に失敗したら WARN を出し、一覧の shortDescription（途中で切れているため
+     * 『。』を含む場合のみ）にフォールバックする。例外は投げない。
+     */
+    async function fillSummary(id, p) {
+        if (typeof p.summary === 'string') return;
+        try {
+            p.summary = buildSummaryLine(await fetchDescription(id));
+        } catch (error) {
+            const short = shortDescriptions.get(id) ?? '';
+            p.summary = short.includes('。') ? buildSummaryLine(short) : '';
+            logger.warn(`動画の説明文の取得に失敗しました (要約行は一覧の概要で代替): id=${id} ${error?.message ?? error}`);
+        }
+        shortDescriptions.delete(id);
     }
 
     /** pending を古い順に配信する。成功の都度保存。 */
@@ -204,11 +233,16 @@ export function createAnnouncer({
                 store.save(state);
                 continue;
             }
-            const text = buildAnnouncementText({ id, title: p.title });
+            if (typeof p.summary !== 'string') {
+                await fillSummary(id, p);
+                store.save(state);
+            }
+            const video = { id, title: p.title, summary: p.summary };
             for (const dest of DESTINATIONS) {
                 if (p.delivered[dest]) continue;
+                const text = dest === 'announce' ? buildAnnouncementText(video) : buildShareText(video);
                 try {
-                    await destinations[dest](text, { id, title: p.title });
+                    await destinations[dest](text, video);
                 } catch (error) {
                     logger.error(`告知の配信に失敗しました (次回再試行): id=${id} 宛先=${dest}`, error);
                     continue;

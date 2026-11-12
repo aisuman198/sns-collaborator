@@ -25,7 +25,76 @@ export function normalizeItem(item) {
     }
     const ms = typeof e.registeredAt === 'string' ? Date.parse(e.registeredAt) : NaN;
     if (!Number.isFinite(ms)) throw new NiconicoError(`essential.registeredAt が不正です: id=${e.id}`);
-    return { id: e.id, title: e.title, registeredAt: e.registeredAt, registeredAtMs: ms };
+    const shortDescription = typeof e.shortDescription === 'string' ? e.shortDescription : '';
+    return { id: e.id, title: e.title, registeredAt: e.registeredAt, registeredAtMs: ms, shortDescription };
+}
+
+export const SUMMARY_MAX_LENGTH = 100;
+export const THUMBINFO_ORIGIN = 'https://ext.nicovideo.jp';
+
+/**
+ * 説明文から要約行を作る純関数。空白・改行を半角スペース 1 つに正規化し、
+ * 先頭から最初の句点『。』まで（含む）を取る（句点が無ければ全文）。
+ * 100 コードポイントを超えたら 100 字に切って末尾に … を付ける。空なら ''。
+ */
+export function buildSummaryLine(description) {
+    if (typeof description !== 'string') return '';
+    const text = description.replace(/\s+/g, ' ').trim();
+    if (text === '') return '';
+    const end = text.indexOf('。');
+    const line = end === -1 ? text : text.slice(0, end + 1);
+    const chars = Array.from(line);
+    if (chars.length <= SUMMARY_MAX_LENGTH) return line;
+    return `${chars.slice(0, SUMMARY_MAX_LENGTH).join('')}…`;
+}
+
+function decodeXmlEntities(text) {
+    return text.replace(/&(#x[0-9a-fA-F]+|#[0-9]+|amp|lt|gt|quot|apos);/g, (match, name) => {
+        switch (name) {
+            case 'amp': return '&';
+            case 'lt': return '<';
+            case 'gt': return '>';
+            case 'quot': return '"';
+            case 'apos': return "'";
+            default: {
+                const code = name[1] === 'x' ? parseInt(name.slice(2), 16) : parseInt(name.slice(1), 10);
+                try {
+                    return String.fromCodePoint(code);
+                } catch {
+                    return match; // 範囲外の数値参照はそのまま残す
+                }
+            }
+        }
+    });
+}
+
+/**
+ * 動画の説明文全文を getthumbinfo の XML から取得する。
+ * 異常（非 200・status が ok でない・description なし・例外・タイムアウト）は NiconicoError。
+ */
+export async function fetchVideoDescription({ videoId, fetchFn = fetch, timeoutMs = DEFAULT_TIMEOUT_MS }) {
+    const url = `${THUMBINFO_ORIGIN}/api/getthumbinfo/${encodeURIComponent(videoId)}`;
+    let xml;
+    try {
+        const res = await fetchFn(url, {
+            headers: { 'User-Agent': 'sns-collaborator' },
+            signal: AbortSignal.timeout(timeoutMs),
+        });
+        if (res.status !== 200) throw new NiconicoError(`HTTP ${res.status}`);
+        xml = await res.text();
+    } catch (error) {
+        if (error instanceof NiconicoError) throw error;
+        throw new NiconicoError(`getthumbinfo の取得に失敗しました (id=${videoId}): ${error?.message ?? error}`, {
+            cause: error,
+        });
+    }
+    if (typeof xml !== 'string' || !/<nicovideo_thumb_response[^>]*\sstatus="ok"/.test(xml)) {
+        throw new NiconicoError(`getthumbinfo の status が ok ではありません: id=${videoId}`);
+    }
+    if (/<description\s*\/>/.test(xml) && !/<description>/.test(xml)) return '';
+    const m = /<description>([\s\S]*?)<\/description>/.exec(xml);
+    if (!m) throw new NiconicoError(`getthumbinfo に description がありません: id=${videoId}`);
+    return decodeXmlEntities(m[1]);
 }
 
 /**

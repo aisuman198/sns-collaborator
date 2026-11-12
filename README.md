@@ -51,15 +51,27 @@ ID は、対象チャンネルで bot 発言が除外されたときの INFO ロ
 #### ニコニコ動画の新着告知
 `NICONICO_USER_ID` を設定すると、同じプロセス内で、毎日決まった時刻（既定 12:30 と 21:30、日本時間）に投稿動画一覧を取得し（非公式 API `nvapi.nicovideo.jp`）、新着を次の文面で 3 か所へ告知します。未設定なら機能オフで、従来の動作は変わりません。
 
+配信告知チャンネル宛て:
 ```
 動画を投稿しました！
 <動画タイトル>
 https://www.nicovideo.jp/watch/<動画ID>
 ```
 
+twitter共有用チャンネルと Misskey 宛ては、タイトルの次に動画の概要の要約行を 1 行加えます（要約行が空なら上と同じ 3 行）:
+```
+動画を投稿しました！
+<動画タイトル>
+<要約行>
+https://www.nicovideo.jp/watch/<動画ID>
+```
+
+要約行は、説明文全文（`ext.nicovideo.jp` の getthumbinfo から取得）の空白・改行を半角スペース 1 つにしたうえで、先頭から最初の `。` まで（含む。無ければ全文）を使い、100 字を超えたら 100 字に切って末尾に `…` を付けます。取得に失敗したら WARN を出し、一覧の概要（約50字で切れている）に `。` が含まれる場合のみそれを使い、無ければ要約行なしで配信します（配信は止めません）。
+
 宛先ごとの形式:
-- 配信告知チャンネルと Misskey: 上記の文面をそのままプレーンテキストで投稿
-- twitter共有用チャンネル: 既存のライブ配信投稿と同じ形式で、本文は空、上記の文面を埋め込み（embed の description）に入れ、「ツイートする」リンクボタン（`https://twitter.com/intent/tweet?text=<本文を encodeURIComponent したもの>`）を付けます。ボタン URL は Discord の上限 512 文字に収めるため、長いタイトルはツイート文側だけ末尾 `…` で切り詰めます（1 行目と動画 URL は常に残り、埋め込みの本文は完全なタイトルのままです）
+- 配信告知チャンネル: 上記の文面をそのままプレーンテキストで投稿
+- Misskey: 要約行入りの文面をプレーンテキストで投稿
+- twitter共有用チャンネル: 既存のライブ配信投稿と同じ形式で、本文は空、要約行入りの文面を埋め込み（embed の description）に入れ、「ツイートする」リンクボタン（`https://twitter.com/intent/tweet?text=<本文を encodeURIComponent したもの>`）を付けます。ボタン URL は Discord の上限 512 文字に収めるため、長いときはツイート文側だけ中間行（タイトル・要約行）を末尾 `…` で切り詰めます（1 行目と動画 URL は常に残り、埋め込みの本文は完全なままです）
 
 宛先（独立に配信し、成否は宛先ごとに記録。1 か所の失敗で他は止まりません）:
 1. Discord `DISCORD_CHANNEL_ID`（配信告知）
@@ -91,8 +103,9 @@ Discord への送信は `allowedMentions: { parse: [] }` 付きで、タイト�
 
 状態ファイル（JSON。一時ファイルへ書いて rename で保存。`lastRunAt` は取得に成功した最終時刻の epoch ミリ秒で、省略可）:
 ```json
-{"version":1,"userId":"140498","lastRunAt":1794225600000,"known":["sm1","sm2"],"pending":{"sm3":{"title":"...","url":"https://www.nicovideo.jp/watch/sm3","registeredAt":"2026-11-09T21:00:00+09:00","delivered":{"announce":true,"twitter":false,"misskey":false}}}}
+{"version":1,"userId":"140498","lastRunAt":1794225600000,"known":["sm1","sm2"],"pending":{"sm3":{"title":"...","url":"https://www.nicovideo.jp/watch/sm3","registeredAt":"2026-11-09T21:00:00+09:00","summary":"要約行。","delivered":{"announce":true,"twitter":false,"misskey":false}}}}
 ```
+`summary` は省略可（無い pending は配信時に取得を試み、だめなら空で配信します）。
 JSON 破損・書式不正は初回扱いにせず、上書きもせず ERROR を 1 回出してその判定では何もしません（ERROR は 1 回だけで、1 分ごとの判定で連発しません）。内容を確認して修正するか、ファイルを削除すると初回扱い（シードのみ）で再開します。
 
 ### 3. アプリケーション起動
