@@ -1,15 +1,14 @@
 import { describe, it, beforeEach } from 'node:test';
 import assert from 'node:assert/strict';
 import {
-    ConfigError,
     buildNoteText,
     createBoundedSet,
     createForwardTracker,
     createMessageHandler,
     createMessageUpdateHandler,
-    loadConfig,
     shouldForward,
 } from '../src/forwarder.js';
+import { ConfigError, loadConfig } from '../src/config.js';
 
 const CHANNEL_ID = 'chan-1';
 const msg = (overrides = {}) => ({
@@ -78,16 +77,16 @@ describe('loadConfig', () => {
         MISSKEY_API_TOKEN: 'm',
     };
     it('全て揃っていれば設定を返す', () => {
-        assert.equal(loadConfig(full).channelId, 'c');
+        assert.equal(loadConfig(full, '/h').announceChannelId, 'c');
     });
     it('欠けている変数名を含むエラーを投げる', () => {
         assert.throws(
-            () => loadConfig({ ...full, DISCORD_TOKEN: '', MISSKEY_API_TOKEN: undefined }),
+            () => loadConfig({ ...full, DISCORD_TOKEN: '', MISSKEY_API_TOKEN: undefined }, '/h'),
             /DISCORD_TOKEN, MISSKEY_API_TOKEN/,
         );
     });
     it('設定不足は ConfigError を投げる', () => {
-        assert.throws(() => loadConfig({}), ConfigError);
+        assert.throws(() => loadConfig({}, '/h'), ConfigError);
     });
 });
 
@@ -288,10 +287,10 @@ describe('loadConfig allowedBotIds', () => {
         MISSKEY_API_TOKEN: 'm',
     };
     it('カンマ区切りを空白トリムして配列にする', () => {
-        assert.deepEqual(loadConfig({ ...base, DISCORD_ALLOWED_BOT_IDS: ' 1, 2 ,,3 ' }).allowedBotIds, ['1', '2', '3']);
+        assert.deepEqual(loadConfig({ ...base, DISCORD_ALLOWED_BOT_IDS: ' 1, 2 ,,3 ' }, '/h').allowedBotIds, ['1', '2', '3']);
     });
     it('未設定・空は空配列', () => {
-        assert.deepEqual(loadConfig(base).allowedBotIds, []);
-        assert.deepEqual(loadConfig({ ...base, DISCORD_ALLOWED_BOT_IDS: '' }).allowedBotIds, []);
+        assert.deepEqual(loadConfig(base, '/h').allowedBotIds, []);
+        assert.deepEqual(loadConfig({ ...base, DISCORD_ALLOWED_BOT_IDS: '' }, '/h').allowedBotIds, []);
     });
 });
