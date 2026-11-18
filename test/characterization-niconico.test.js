@@ -44,7 +44,7 @@ beforeEach(() => {
 });
 afterEach(() => rmSync(dir, { recursive: true, force: true }));
 
-function setup({ fetchPage, fetchAll, destinations, store, now = () => NOW, userId = USER } = {}) {
+function setup({ fetchPage, fetchAll, fetchDescription, destinations, store, now = () => NOW, userId = USER } = {}) {
     const logger = makeLogger();
     const stats = createStats();
     const sent = { announce: [], twitter: [], misskey: [] };
@@ -59,6 +59,8 @@ function setup({ fetchPage, fetchAll, destinations, store, now = () => NOW, user
         now,
         fetchPage: fetchPage ?? (async () => ({ items: [] })),
         fetchAll: fetchAll ?? (async () => []),
+        // 既定の取得（実ネットワーク）に落ちないよう必ず差し替える。空の説明文 = 要約行なし
+        fetchDescription: fetchDescription ?? (async () => ''),
     });
     return { announcer, logger, stats, sent, store: st };
 }
@@ -96,9 +98,11 @@ function flakyStore(failOn) {
 describe('C12 既定の取得経路 (globalThis.fetch 差し替え)', () => {
     let original;
     let calls;
+    let descCalls;
     beforeEach(() => {
         original = globalThis.fetch;
         calls = [];
+        descCalls = [];
     });
     afterEach(() => {
         globalThis.fetch = original;
@@ -108,7 +112,15 @@ describe('C12 既定の取得経路 (globalThis.fetch 差し替え)', () => {
         data: { totalCount, items: items.map((i) => ({ essential: i })) },
     });
     const install = (b) => {
+        // 一覧 (nvapi) と説明文 (getthumbinfo) は URL で振り分け、calls には一覧の呼び出しだけ、descCalls には説明文の呼び出しを積む
         globalThis.fetch = async (url, init) => {
+            if (String(url).startsWith('https://ext.nicovideo.jp/api/getthumbinfo/')) {
+                descCalls.push({ url, init });
+                return {
+                    status: 200,
+                    text: async () => '<nicovideo_thumb_response status="ok"><thumb><description>説明です。続き</description></thumb></nicovideo_thumb_response>',
+                };
+            }
             calls.push({ url, init });
             return { status: 200, json: async () => b };
         };
@@ -143,7 +155,11 @@ describe('C12 既定の取得経路 (globalThis.fetch 差し替え)', () => {
         await a.tick();
         assert.equal(calls.length, 1);
         assert.match(calls[0].url, /pageSize=20&page=1$/);
+        // 新着 1 件につき説明文を getthumbinfo で 1 回取得する（一覧の取得とは別経路）
+        assert.equal(descCalls.length, 1);
+        assert.equal(descCalls[0].url, 'https://ext.nicovideo.jp/api/getthumbinfo/sm2');
         assert.deepEqual(sent, ['announce', 'twitter', 'misskey']);
+        assert.deepEqual(readState().pending, {}); // 配信完了後は pending が空
     });
 
     it('fetchUserVideosPage も fetchFn 省略時は呼び出し時点の globalThis.fetch を使う', async () => {
@@ -207,13 +223,14 @@ describe('C13 状態ファイルのゴールデン (README の形状)', () => {
                     title: 'タイトル',
                     url: 'https://www.nicovideo.jp/watch/sm3',
                     registeredAt, // 取得文字列そのまま（正規化しない）
+                    summary: '', // 説明文が空 (注入した fetchDescription) なので空文字。保存されるので再取得されない
                     delivered: { announce: true, twitter: false, misskey: true },
                 },
             },
             lastRunAt: NOW,
         });
         // pending 内のキー順
-        assert.deepEqual(Object.keys(readState().pending.sm3), ['title', 'url', 'registeredAt', 'delivered']);
+        assert.deepEqual(Object.keys(readState().pending.sm3), ['title', 'url', 'registeredAt', 'delivered', 'summary']); // summary は後から追記されるので末尾
         assert.deepEqual(Object.keys(readState().pending.sm3.delivered), ['announce', 'twitter', 'misskey']);
     });
 
@@ -408,7 +425,7 @@ describe('C17 save 失敗の挙動と 24 時間境界', () => {
     it('F02 配信成功後の save 失敗: delivered が残らず、次の tick で同じ宛先へ再投稿される', async () => {
         // F02
         seedState({ lastRunAt: NOW - HOUR });
-        const store = flakyStore((n) => n === 2); // 1: 新着登録, 2: announce 成功直後
+        const store = flakyStore((n) => n === 3); // 1: 新着登録, 2: 要約行の保存, 3: announce 成功直後
         const items = [vid('sm2', HOUR)];
         const t = setup({ store, fetchPage: async () => ({ items }) });
         await assert.rejects(t.announcer.tick(), /disk full/);
@@ -429,8 +446,8 @@ describe('C17 save 失敗の挙動と 24 時間境界', () => {
     it('F02 最後の宛先 (misskey) の成功後に delivered 保存が失敗すると、次回 misskey だけが二重投稿される', async () => {
         // F02
         seedState({ lastRunAt: NOW - HOUR });
-        // 1: 新着登録, 2/3/4: 各宛先の delivered 保存, 5: pending 削除
-        const store = flakyStore((n) => n === 4);
+        // 1: 新着登録, 2: 要約行の保存, 3/4/5: 各宛先の delivered 保存, 6: pending 削除
+        const store = flakyStore((n) => n === 5);
         const t = setup({ store, fetchPage: async () => ({ items: [vid('sm2', HOUR)] }) });
         await assert.rejects(t.announcer.tick(), /disk full/);
         assert.deepEqual(readState().pending.sm2.delivered, { announce: true, twitter: true, misskey: false });
@@ -442,8 +459,8 @@ describe('C17 save 失敗の挙動と 24 時間境界', () => {
     it('F02 pending 削除の save が失敗しても再投稿はなく、niconicoAnnounced は次回の tick で加算される', async () => {
         // F02
         seedState({ lastRunAt: NOW - HOUR });
-        // 1: 新着登録, 2/3/4: 各宛先の delivered 保存, 5: pending 削除
-        const store = flakyStore((n) => n === 5);
+        // 1: 新着登録, 2: 要約行の保存, 3/4/5: 各宛先の delivered 保存, 6: pending 削除
+        const store = flakyStore((n) => n === 6);
         const t = setup({ store, fetchPage: async () => ({ items: [vid('sm2', HOUR)] }) });
         await assert.rejects(t.announcer.tick(), /disk full/);
         assert.deepEqual(readState().pending.sm2.delivered, { announce: true, twitter: true, misskey: true });
@@ -1010,5 +1027,74 @@ describe('C25 loadConfig の境界', () => {
         assert.equal(typeof c.niconico.userId, 'string');
         assert.equal(c.niconico.postChannelId, 'p');
         assert.match(c.niconico.stateFile, /^\/another\/Library\//);
+    });
+});
+
+// ---------------------------------------------------------------- C26
+describe('C26 要約行 (説明文の取得と文面)', () => {
+    const withShort = (v, shortDescription) => ({ ...v, shortDescription });
+
+    it('要約行は twitter / misskey の文面のタイトルの次にだけ入り、announce は 3 行のまま。summary は状態ファイルに保存される', async () => {
+        seedState({ lastRunAt: NOW - HOUR });
+        const t = setup({
+            fetchPage: async () => ({ items: [vid('sm2', HOUR)] }),
+            fetchDescription: async () => '最初の文です。二文目です。',
+        });
+        await t.announcer.tick();
+        const url = 'https://www.nicovideo.jp/watch/sm2';
+        assert.deepEqual(t.sent.announce, [`動画を投稿しました！\ntitle-sm2\n${url}`]);
+        const withSummary = `動画を投稿しました！\ntitle-sm2\n最初の文です。\n${url}`;
+        assert.deepEqual(t.sent.twitter, [withSummary]);
+        assert.deepEqual(t.sent.misskey, [withSummary]);
+    });
+
+    it('summary は 1 度保存されたら再取得されない（配信失敗の再試行でも fetchDescription は 1 回）', async () => {
+        seedState({ lastRunAt: NOW - HOUR });
+        let descCalls = 0;
+        let fail = true;
+        const t = setup({
+            fetchPage: async () => ({ items: [vid('sm2', HOUR)] }),
+            fetchDescription: async () => { descCalls += 1; return '要約です。'; },
+            destinations: {
+                announce: async () => {},
+                twitter: async () => { if (fail) throw new Error('boom'); },
+                misskey: async () => {},
+            },
+        });
+        await t.announcer.tick();
+        assert.equal(readState().pending.sm2.summary, '要約です。');
+        fail = false;
+        await t.announcer.tick();
+        assert.equal(descCalls, 1);
+        assert.deepEqual(readState().pending, {});
+    });
+
+    it('説明文の取得に失敗: 一覧の shortDescription に句点があればそれで代替し WARN。配信は止まらない', async () => {
+        seedState({ lastRunAt: NOW - HOUR });
+        const t = setup({
+            fetchPage: async () => ({ items: [withShort(vid('sm2', HOUR), '一覧の概要です。途中で切れ')] }),
+            fetchDescription: async () => { throw new NiconicoError('HTTP 503'); },
+        });
+        assert.deepEqual(await t.announcer.tick(), { status: 'ok', pending: 0 });
+        assert.match(t.sent.twitter[0], /^動画を投稿しました！\ntitle-sm2\n一覧の概要です。\nhttps:/);
+        assert.equal(t.sent.announce.length, 1);
+        assert.equal(t.logger.logs.warn.length, 1);
+        assert.match(t.logger.logs.warn[0], /説明文の取得に失敗しました.*id=sm2.*HTTP 503/);
+    });
+
+    it('説明文の取得に失敗かつ shortDescription に句点が無ければ要約行なし (summary は空文字で保存) で 3 行のまま配信', async () => {
+        seedState({ lastRunAt: NOW - HOUR });
+        const store = flakyStore((n) => n === 3); // 配信直後に落として pending を残し、保存内容を見る
+        const t = setup({
+            store,
+            fetchPage: async () => ({ items: [withShort(vid('sm2', HOUR), '句点のない概要')] }),
+            fetchDescription: async () => { throw new NiconicoError('HTTP 503'); },
+        });
+        await assert.rejects(t.announcer.tick(), /disk full/);
+        assert.equal(readState().pending.sm2.summary, '');
+        assert.equal(t.sent.announce.length, 1);
+        assert.equal(t.logger.logs.warn.length, 1);
+        await t.announcer.tick();
+        assert.equal(t.sent.twitter[0], '動画を投稿しました！\ntitle-sm2\nhttps://www.nicovideo.jp/watch/sm2');
     });
 });

@@ -58,6 +58,8 @@ Discord の 1 チャンネルに流れるライブ配信の告知を Misskey と
 責務: nvapi の取得、新着判定、未配信の追跡、宛先への配信、定刻の判定、状態ファイルの管理。
 
 - 宛先は `announce` → `twitter` → `misskey` の順で独立に配信し、成功するたびに状態を保存する
+- 要約行は、未配信 1 件につき最初の配信の前に 1 度だけ確定し、状態ファイルの `pending[].summary` に保存してから配信する（空文字は「要約行なし」の確定）。再試行や再起動の後も同じ値を使う。`announce` 宛ては要約行を使わず、`twitter` と `misskey` 宛てだけが要約行入りの文面になる
+- 説明文の取得（`fetchDescription`）に失敗しても配信は止めない。WARN を出し、一覧の概要（`shortDescription`。途中で切れている）に `。` が含まれる場合だけそれから要約行を作り、無ければ空にする。一覧の概要はメモリ上にだけ持ち、状態ファイルには書かない（再起動をまたぐと失われ、その場合の代替は空になる）
 - `lastRunAt` は取得に成功したときだけ更新する。取得に失敗しても未配信の再試行は行う
 - 状態ファイルが破損しているときは何も上書きしない。ERROR は状態が戻るまでの間に 1 回だけ出す
 - 初回と `userId` の変更時はシードする（投稿しない。公開前の動画は既知にしない）
@@ -96,7 +98,10 @@ Discord の 1 チャンネルに流れるライブ配信の告知を Misskey と
 | 告知が流れ、中継が監視するチャンネル | 告知チャンネル | `announceChannelId` |
 | 中継で確定した本文 | 中継本文 | `buildRelayText`、`MAX_RELAY_TEXT_LENGTH` |
 | Misskey の投稿 | ノート | `createNote` |
-| 3 宛先共通の動画告知の本文 | 告知文 | `buildAnnouncementText` |
+| 告知チャンネル宛ての動画告知の本文（3 行） | 告知文 | `buildAnnouncementText` |
+| 動画の概要から作る 1 行 | 要約行 | `summary`、`buildSummaryLine` |
+| `twitter` と `misskey` 宛ての動画告知の本文（タイトルの次に要約行を入れる） | 要約付き告知文 | `buildSummaryAnnouncementText` |
+| 動画の説明文全文を取得する処理 | 説明文の取得 | `fetchDescription`、`fetchVideoDescription` |
 | 中継の処理済み記録 | 追跡記録 | `createRelayTracker` |
 | ニコニコの新着を告知する処理 | ニコニコ告知 | `createNiconicoAnnouncer` |
 | 取得・新着判定・配信の 1 回分 | 告知サイクル | `announcer.runCycle` |
@@ -123,6 +128,7 @@ Discord の 1 チャンネルに流れるライブ配信の告知を Misskey と
 | `NICONICO_CHECK_TIMES` | 環境変数 | 定刻 |
 | `twitter` | 状態ファイル `delivered` のキー | 共有チャンネルという宛先 |
 | `announce` | 状態ファイル `delivered` のキー | 告知チャンネルという宛先 |
+| `summary` | 状態ファイル `pending` のキー | 要約行 |
 | `監視チャンネル` | ログ文言 | 告知チャンネル |
 | `twitter共有用チャンネル` | ログ文言 | 共有チャンネル |
 | `targetChannel` | heartbeat のキー | 告知チャンネルで受けた投稿の数 |
@@ -157,7 +163,7 @@ flowchart TD
 4. `*/rules.js` は何も import しない（例外は同じ文脈の定数のみ）
 5. `discord.js` の import は `app.js`、`create-app.js`、`ops/discord-logging.js` に限る。`Client` の生成は `app.js` だけが行う。`misskey-js` の import は `app.js` だけが行う
 6. `config.js` は環境変数を読む唯一のモジュール。`process.env` を直接参照するのは `app.js`（`createApp` への受け渡し）だけ
-7. 既定引数に置いてよいのは時計（`now`）、タイマー（`setTimeoutFn` など）、数値定数だけ。logger、統計、追跡記録、ファイル書き込みを既定で生成しない。例外は `niconico/nvapi.js` の `fetchFn = fetch` で、アダプタ本体の既定値なので置く。ただし `createApp` は `fetchFn` を必須とし、常に明示して渡す
+7. 既定引数に置いてよいのは時計（`now`）、タイマー（`setTimeoutFn` など）、数値定数だけ。logger、統計、追跡記録、ファイル書き込みを既定で生成しない。例外は `niconico/nvapi.js` と `niconico/thumbinfo.js` の `fetchFn = fetch` で、アダプタ本体の既定値なので置く。ただし `createApp` は `fetchFn` を必須とし、常に明示して渡す
 
 これらの規則は `test/architecture.test.js` が `src/` の import 文を読んで検査する。
 
@@ -172,10 +178,12 @@ flowchart TD
 | | `needsSeed(loaded, userId)` | シードが必要かの判定 |
 | | `selectSeedVideos(all, nowMs)` | 公開前の動画を除く |
 | | `createPendingEntry(video)`、`isExpired(entry, nowMs)`、`undeliveredDestinations(entry)` | 未配信 1 件の扱い |
-| | `buildAnnouncementText`、`watchUrl` | 文面と URL |
+| | `buildAnnouncementText`、`buildSummaryAnnouncementText`、`watchUrl` | 文面と URL。要約行が空なら `buildSummaryAnnouncementText` は `buildAnnouncementText` と同じ 3 行を返す |
+| | `buildSummaryLine(description)`、`buildFallbackSummary(shortDescription)` | 要約行の生成。空白・改行を半角スペース 1 つにし、最初の `。` まで（含む。無ければ全文）を取り、100 コードポイントを超えたら 100 字に切って末尾に `…` を付ける。空や文字列でない入力は空文字。`buildFallbackSummary` は一覧の概要に `。` が含まれるときだけ `buildSummaryLine` を適用し、含まれなければ空文字 |
 | `niconico/schedule.js` | `parseCheckTimes`、`formatCheckTimes`、`latestScheduledAt` | 定刻の解析、整形、直近の定刻 |
 | | `isScheduledRunDue(info, nowMs, checkTimes)`、`nextRetryAt(result, nowMs, retryIntervalMs)` | ポーリング判定の中核。再試行待ちの判定はポーラーが持ち、`inspect` は遅延呼び出しにする |
-| `niconico/nvapi.js` | `normalizeItem` | nvapi の項目の正規化 |
+| `niconico/nvapi.js` | `normalizeItem` | nvapi の項目の正規化（一覧の概要 `shortDescription` を、文字列でなければ空文字として含める） |
+| `niconico/thumbinfo.js` | `parseDescription(xml, videoId)` | getthumbinfo の XML から説明文を取り出す。`status="ok"` でない、`description` がない場合は `NiconicoError`。空の `<description/>` は空文字。XML の文字参照を復号する |
 | `posting/share.js` | `buildShareUrl`、`buildSharePayload` | 共有投稿の URL と payload |
 | `ops/health.js` | `formatDuration`、`buildHeartbeatLine` | heartbeat 行の組み立て |
 | `config.js` | `parseIdList`、`parseMinutes`、`loadConfig(env, home)` | 引数だけで決まる |
@@ -192,7 +200,7 @@ flowchart TD
 | Discord クライアント | `createApp` の `createDiscordClient(options)` | `posting/`、`ops/discord-logging.js`、生存確認の `getStatus` |
 | Misskey クライアント | `createApp` の `createMisskeyClient(options)` | `posting/` |
 | 送信 | 文脈には `(text) => Promise` の関数を渡す | 中継の `postNote` / `postShare`、ニコニコ告知の `destinations` |
-| nvapi | `createApp` の `fetchFn`。`createApp` が `fetchPage` / `fetchAll` に束ねる | ニコニコ告知 |
+| nvapi、getthumbinfo | `createApp` の `fetchFn`。`createApp` が `fetchPage` / `fetchAll` / `fetchDescription` に束ねる | ニコニコ告知 |
 | ファイル | `fs` そのものは注入しない。`createStateStore` と `createFileStatusWriter` をアダプタとして注入する | ニコニコ告知、生存確認 |
 | 時計、タイマー | `now` / `setTimeoutFn` など | 各所 |
 | プロセス | `exit`、`uptimeMs` | 生存確認の `onFatal`、`getStatus` |
@@ -216,6 +224,7 @@ src/
     poller.js            1 分ごとのポーリング
     schedule.js          JST の定刻計算（純粋）
     nvapi.js             nvapi の腐敗防止層
+    thumbinfo.js         getthumbinfo（動画の説明文）の腐敗防止層
   posting/
     senders.js           Discord と Misskey への送信
     share.js             共有投稿の URL と payload（純粋）
@@ -231,9 +240,9 @@ scripts/
   launchd.js             plist の生成と launchctl の操作
 ```
 
-`test/` はフラットに置く（`test/*.test.js`）。`src/` は 19 ファイル（直下 3、`relay/` 2、`niconico/` 6、`posting/` 2、`ops/` 4、`shared/` 2）。
+`test/` はフラットに置く（`test/*.test.js`）。`src/` は 20 ファイル（直下 3、`relay/` 2、`niconico/` 7、`posting/` 2、`ops/` 4、`shared/` 2）。
 
-**ディレクトリ分割とフラット + 接頭辞の比較**: 文脈別に 1 階層のディレクトリへ分ける。フラットのまま `relay-rules.js` のように接頭辞を付ける案では `src/` の 19 ファイルが 1 か所に並び、`shared` と `ops` のような文脈以外の区分は接頭辞では表しにくい。ディレクトリに分けると `from '../relay/...'` という import の形だけで文脈をまたぐ依存が見え、4.1 の規則をパスの判定だけで検査できる。2 階層以上は、最大の `niconico/` でも 6 ファイルなので必要がない。
+**ディレクトリ分割とフラット + 接頭辞の比較**: 文脈別に 1 階層のディレクトリへ分ける。フラットのまま `relay-rules.js` のように接頭辞を付ける案では `src/` の 20 ファイルが 1 か所に並び、`shared` と `ops` のような文脈以外の区分は接頭辞では表しにくい。ディレクトリに分けると `from '../relay/...'` という import の形だけで文脈をまたぐ依存が見え、4.1 の規則をパスの判定だけで検査できる。2 階層以上は、最大の `niconico/` でも 7 ファイルなので必要がない。
 
 ### 5.1 各ファイルの主な export
 
@@ -243,12 +252,13 @@ scripts/
 | `config.js` | `REQUIRED_ENV`、`ConfigError`、`parseIdList`、`parseMinutes`、`loadConfig(env, home)` | `env` と `home` は必須引数 |
 | `relay/rules.js` | `MAX_RELAY_TEXT_LENGTH`、`classifyAuthor`、`shouldForward`、`shouldShare`、`cleanDiscordText`、`buildRelayText` | 4.2 |
 | `relay/handlers.js` | `createBoundedSet`、`createRelayTracker`、`createRelayHandlers` | `createRelayHandlers` は `{ announceChannelId, allowedBotIds, selfId, postNote, postShare, tracker, logger, stats, now }` を受け取り、`onMessageCreate` / `onMessageUpdate` を返す。`selfId` は関数。`postShare` は `null` を取れる（`DISCORD_POST_CHANNEL_ID` 未設定時は共有をしない） |
-| `niconico/rules.js` | `STALE_MS`、`ANOMALY_THRESHOLD`、`DESTINATIONS`、4.2 の各関数 | |
-| `niconico/announcer.js` | `POLL_PAGE_SIZE`、`FAILURE_ALERT_THRESHOLD`、`createNiconicoAnnouncer` | `fetchPage` / `fetchAll` は必須で、既定引数を持たない |
+| `niconico/rules.js` | `STALE_MS`、`ANOMALY_THRESHOLD`、`DESTINATIONS`、`SUMMARY_MAX_LENGTH`、4.2 の各関数 | |
+| `niconico/announcer.js` | `POLL_PAGE_SIZE`、`FAILURE_ALERT_THRESHOLD`、`createNiconicoAnnouncer` | `fetchPage` / `fetchAll` / `fetchDescription` は必須で、既定引数を持たない |
 | `niconico/state-store.js` | `createStateStore` | |
 | `niconico/poller.js` | `POLL_INTERVAL_MS`、`RETRY_INTERVAL_MS`、`createPoller` | |
 | `niconico/schedule.js` | `DEFAULT_CHECK_TIMES`、`parseCheckTimes`、`formatCheckTimes`、`latestScheduledAt`、`isScheduledRunDue`、`nextRetryAt` | |
 | `niconico/nvapi.js` | `NVAPI_ORIGIN`、`DEFAULT_TIMEOUT_MS`、`SEED_PAGE_SIZE`、`MAX_SEED_PAGES`、`NiconicoError`、`normalizeItem`、`fetchUserVideosPage`、`fetchAllUserVideos` | |
+| `niconico/thumbinfo.js` | `THUMBINFO_ORIGIN`、`fetchVideoDescription({ videoId, fetchFn, timeoutMs })`、4.2 の関数 | `NiconicoError` と `DEFAULT_TIMEOUT_MS` は `nvapi.js` から import する |
 | `posting/senders.js` | `createPosting({ discordClient, misskeyClient })` | `{ sendText, sendShare(channelId, text), createNote }` を返す |
 | `posting/share.js` | `TWEET_INTENT_URL`、`MAX_BUTTON_URL_LENGTH`、`buildShareUrl`、`buildSharePayload` | ボタンの component の type は `discord.js` を import せず、ローカル定数で持つ |
 | `ops/health.js` | `formatDuration`、`buildHeartbeatLine`、`createFileStatusWriter`、`createHealthMonitor` | `createHealthMonitor` は `writeStatus` の既定を持たず、`checkHealth` を公開する |
@@ -370,6 +380,7 @@ createApp({
       "title": "...",
       "url": "https://www.nicovideo.jp/watch/sm3",
       "registeredAt": "2026-11-09T21:00:00+09:00",
+      "summary": "...",
       "delivered": { "announce": true, "twitter": false, "misskey": false }
     }
   },
@@ -379,7 +390,8 @@ createApp({
 
 - キー名と `version: 1` は固定。書き込みは `JSON.stringify(state, null, 2)`（末尾改行なし）を `<file>.<pid>.tmp` に書いてから rename する
 - `pending[].url` はコード上で読まれないが、検証（`typeof p.url === 'string'`）の対象なので書く。欠けると、検証を行う版では破損扱いになる
-- 保存のタイミング: シード時に 1 回、取得成功時に 1 回、宛先の配信成功ごと、諦めた時、全宛先の完了時
+- 保存のタイミング: シード時に 1 回、取得成功時に 1 回、要約行の確定時、宛先の配信成功ごと、諦めた時、全宛先の完了時
+- `pending[].summary` は任意の文字列。キーがない（未確定）ときは次の配信の前に確定して保存する。空文字は要約行なしの確定で、再取得しない。文字列以外は破損扱い
 - 未知のキーは無視する。`delivered` の欠けたキーは未配信として扱う
 
 ### 7.3 heartbeat
@@ -421,6 +433,7 @@ createApp({
 | WARN | `ニコニコ動画の取得に失敗しました (連続<n>回): <message>` | |
 | ERROR | `ニコニコ動画の取得が <n> 回連続で失敗しています` | |
 | INFO | `ニコニコ動画の取得が回復しました (失敗<n>回後)` | |
+| WARN | `動画の説明文の取得に失敗しました (要約行は一覧の概要で代替): id=<id> <message>` | |
 | WARN | `古い新規動画のため告知せず既知に登録します: id=<id> registeredAt=<ISO>` | |
 | ERROR | `告知対象が <n> 件あり異常のため投稿せず既知に登録します: <id,...>` | |
 | ERROR | `24時間を過ぎた未配信を諦めます: id=<id> 未配信=<宛先,...>` | |
@@ -444,9 +457,11 @@ createApp({
 |------|------|
 | Misskey（中継、ニコニコ共通） | `notes/create` に `{ text }` のみ。`visibility` などを足さない |
 | 告知チャンネル（ニコニコ） | `{ content: <告知文>, allowedMentions: { parse: [] } }` |
-| 共有チャンネル（中継、ニコニコ共通） | 下記の共有 payload |
+| 共有チャンネル（中継、ニコニコ共通） | 下記の共有 payload（ニコニコは要約付き告知文を `<本文>` にする） |
 
-告知文は `動画を投稿しました！\n<title>\nhttps://www.nicovideo.jp/watch/<id>` で 3 宛先共通。切り詰めない。
+告知文は `動画を投稿しました！\n<title>\nhttps://www.nicovideo.jp/watch/<id>` の 3 行で、告知チャンネル宛てに使う。切り詰めない。
+
+要約付き告知文は `動画を投稿しました！\n<title>\n<要約行>\nhttps://www.nicovideo.jp/watch/<id>` の 4 行で、共有チャンネルと Misskey 宛てに使う。要約行が空なら告知文と同じ 3 行。Misskey へは本文を切り詰めずに `{ text }` で送る。
 
 ```json
 {
@@ -461,10 +476,11 @@ createApp({
 }
 ```
 
-ボタン URL は全体で 512 文字以下。3 行以上なら先頭行と末尾行を残して中間を `…` で切り詰め、2 行以下なら末尾を切り詰める（コードポイント単位）。
+ボタン URL は全体で 512 文字以下。3 行以上なら先頭行と末尾行を残して中間（ニコニコ告知ではタイトルと要約行）を `…` で切り詰め、2 行以下なら末尾を切り詰める（コードポイント単位）。
 
 ### 7.7 その他の外部接点
 
 - Discord の intents: `Guilds`、`GuildMessages`、`MessageContent`。Partials は指定しない
 - nvapi: `https://nvapi.nicovideo.jp/v2/users/<userId>/videos?sortKey=registeredAt&sortOrder=desc&pageSize=<n>&page=<n>`、ヘッダ `X-Frontend-Id: 6` と `User-Agent: sns-collaborator`、タイムアウト 15 秒、新着はページサイズ 20 の 1 ページ目のみ、シードはサイズ 100 で最大 50 ページ（途中の失敗で全体失敗）
-- しきい値: 再試行 5 分、ポーリング 1 分、古さ 24 時間、異常 4 件、連続失敗の ERROR は 3 回、追跡記録 100 件、生存確認 1 分
+- getthumbinfo: `https://ext.nicovideo.jp/api/getthumbinfo/<videoId>`（XML）、ヘッダ `User-Agent: sns-collaborator`、タイムアウト 15 秒。説明文は `<description>` の中身（XML の文字参照を復号）。HTTP 200 以外、`status="ok"` でない応答、`description` の欠落は取得失敗として扱う。要約行が未確定の未配信 1 件につき 1 回だけ呼ぶ（取得失敗の再試行はしない）
+- しきい値: 再試行 5 分、ポーリング 1 分、古さ 24 時間、異常 4 件、要約行の長さ 100 字、連続失敗の ERROR は 3 回、追跡記録 100 件、生存確認 1 分
