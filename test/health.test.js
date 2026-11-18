@@ -3,7 +3,8 @@ import assert from 'node:assert/strict';
 import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
-import { createFileStatusWriter, createHealthMonitor, defaultStatusFile, parseMinutes } from '../src/health.js';
+import { createFileStatusWriter, createHealthMonitor } from '../src/health.js';
+import { defaultStatusFile, parseMinutes } from '../src/config.js';
 import { createStats } from '../src/stats.js';
 
 const MIN = 60000;

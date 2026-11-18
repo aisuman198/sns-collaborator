@@ -5,8 +5,8 @@ import {
     createForwardTracker,
     createMessageHandler,
     createMessageUpdateHandler,
-    loadConfig,
 } from '../src/forwarder.js';
+import { loadConfig } from '../src/config.js';
 import { sendShare } from '../src/share.js';
 import { createStats } from '../src/stats.js';
 
@@ -187,7 +187,7 @@ describe('loadConfig postChannelId', () => {
         MISSKEY_API_TOKEN: 'k',
     };
     it('未設定なら null、設定すれば値を返す', () => {
-        assert.equal(loadConfig(base).postChannelId, null);
-        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: 'p' }).postChannelId, 'p');
+        assert.equal(loadConfig(base, '/h').postChannelId, null);
+        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: 'p' }, '/h').postChannelId, 'p');
     });
 });

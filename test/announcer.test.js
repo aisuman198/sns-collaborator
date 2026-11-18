@@ -13,7 +13,8 @@ import {
     createPoller,
     createStateStore,
 } from '../src/announcer.js';
-import { ConfigError, createMessageHandler, loadConfig } from '../src/forwarder.js';
+import { createMessageHandler } from '../src/forwarder.js';
+import { ConfigError, loadConfig } from '../src/config.js';
 import { createHealthMonitor } from '../src/health.js';
 import { parseCheckTimes } from '../src/schedule.js';
 import { createStats } from '../src/stats.js';

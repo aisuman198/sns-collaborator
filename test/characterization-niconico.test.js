@@ -13,7 +13,7 @@ import {
     createPoller,
     createStateStore,
 } from '../src/announcer.js';
-import { ConfigError, loadConfig } from '../src/forwarder.js';
+import { ConfigError, loadConfig } from '../src/config.js';
 import { NiconicoError, fetchAllUserVideos, fetchUserVideosPage } from '../src/niconico.js';
 import { createStats } from '../src/stats.js';
 

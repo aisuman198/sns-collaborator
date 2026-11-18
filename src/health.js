@@ -1,15 +1,10 @@
 // 生存確認モニタ（now・タイマー・状態取得・ステータス書き込みを注入してテスト可能にする）
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
-import { dirname, join } from 'node:path';
+import { dirname } from 'node:path';
+import { defaultStatusFile } from './config.js';
 
 const MIN = 60 * 1000;
-
-/** 環境変数から分指定の値を読む。不正値は既定値。 */
-export function parseMinutes(value, defaultMinutes) {
-    const n = Number(value);
-    return Number.isFinite(n) && n > 0 ? n : defaultMinutes;
-}
 
 export function formatDuration(ms) {
     const s = Math.floor(ms / 1000);
@@ -17,11 +12,6 @@ export function formatDuration(ms) {
     const h = Math.floor((s % 86400) / 3600);
     const m = Math.floor((s % 3600) / 60);
     return `${d}d${h}h${m}m${s % 60}s`;
-}
-
-/** ステータスファイルの既定パス（HEALTH_STATUS_FILE があれば優先）。 */
-export function defaultStatusFile(env = process.env, home = homedir()) {
-    return env.HEALTH_STATUS_FILE || join(home, 'Library', 'Logs', 'sns-collaborator', 'heartbeat.log');
 }
 
 /** 同ディレクトリの一時ファイルに書いて rename するアトミック上書き。 */
@@ -56,7 +46,7 @@ export function createHealthMonitor({
     stats,
     onFatal,
     checkIntervalMs = MIN,
-    writeStatus = createFileStatusWriter(defaultStatusFile()),
+    writeStatus = createFileStatusWriter(defaultStatusFile(process.env, homedir())),
     maxNotReadyMs = 5 * MIN,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,
