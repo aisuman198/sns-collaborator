@@ -1,8 +1,6 @@
 // 生存確認モニタ（now・タイマー・状態取得・ステータス書き込みを注入してテスト可能にする）
 import { mkdirSync, renameSync, unlinkSync, writeFileSync } from 'node:fs';
-import { homedir } from 'node:os';
 import { dirname } from 'node:path';
-import { defaultStatusFile } from './config.js';
 
 const MIN = 60 * 1000;
 
@@ -46,7 +44,7 @@ export function createHealthMonitor({
     stats,
     onFatal,
     checkIntervalMs = MIN,
-    writeStatus = createFileStatusWriter(defaultStatusFile(process.env, homedir())),
+    writeStatus,
     maxNotReadyMs = 5 * MIN,
     setIntervalFn = setInterval,
     clearIntervalFn = clearInterval,

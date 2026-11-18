@@ -179,7 +179,7 @@ describe('twitter共有用チャンネルへの投稿（share）', () => {
     });
 });
 
-describe('loadConfig postChannelId', () => {
+describe('loadConfig shareChannelId', () => {
     const base = {
         DISCORD_TOKEN: 't',
         DISCORD_CHANNEL_ID: 'c',
@@ -187,7 +187,7 @@ describe('loadConfig postChannelId', () => {
         MISSKEY_API_TOKEN: 'k',
     };
     it('未設定なら null、設定すれば値を返す', () => {
-        assert.equal(loadConfig(base, '/h').postChannelId, null);
-        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: 'p' }, '/h').postChannelId, 'p');
+        assert.equal(loadConfig(base, '/h').shareChannelId, null);
+        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: 'p' }, '/h').shareChannelId, 'p');
     });
 });

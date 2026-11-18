@@ -944,22 +944,22 @@ describe('C25 loadConfig の境界', () => {
         assert.equal(c.misskeyInstanceUrl, 'not a url/');
     });
 
-    it('通常設定の戻り値の形 (niconico 無効・postChannelId なし)', () => {
+    it('通常設定の戻り値の形 (niconico 無効・shareChannelId なし)', () => {
         const c = loadConfig(base, '/h');
         assert.equal(c.niconico, null);
         assert.equal(c.discordToken, 't');
-        assert.equal(c.channelId, 'c');
+        assert.equal(c.announceChannelId, 'c');
         assert.equal(c.misskeyInstanceUrl, 'https://misskey.example');
         assert.equal(c.misskeyApiToken, 'm');
         assert.deepEqual(c.allowedBotIds, []);
-        assert.equal(c.postChannelId, null);
+        assert.equal(c.shareChannelId, null);
     });
 
-    it('DISCORD_POST_CHANNEL_ID だけでも postChannelId が入り niconico は null。空文字は null', () => {
+    it('DISCORD_POST_CHANNEL_ID だけでも shareChannelId が入り niconico は null。空文字は null', () => {
         const c = loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: 'p' }, '/h');
-        assert.equal(c.postChannelId, 'p');
+        assert.equal(c.shareChannelId, 'p');
         assert.equal(c.niconico, null);
-        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: '' }, '/h').postChannelId, null);
+        assert.equal(loadConfig({ ...base, DISCORD_POST_CHANNEL_ID: '' }, '/h').shareChannelId, null);
     });
 
     it('NICONICO_USER_ID が空文字なら機能オフ (他の niconico 設定が不正でも検証しない)', () => {
@@ -1025,7 +1025,8 @@ describe('C25 loadConfig の境界', () => {
     it('home 引数は stateFile の既定パスに反映される / ユーザー ID は文字列のまま保持される', () => {
         const c = loadConfig(nico, '/another');
         assert.equal(typeof c.niconico.userId, 'string');
-        assert.equal(c.niconico.postChannelId, 'p');
+        assert.equal(c.shareChannelId, 'p');
+        assert.equal('postChannelId' in c.niconico, false);
         assert.match(c.niconico.stateFile, /^\/another\/Library\//);
     });
 });

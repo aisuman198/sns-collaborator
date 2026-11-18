@@ -1,6 +1,6 @@
 // 配線（副作用なしで import できる。実物の依存は app.js が注入する）
 import { Events, GatewayIntentBits } from 'discord.js';
-import { defaultStatusFile, loadConfig, parseMinutes } from './config.js';
+import { loadConfig } from './config.js';
 import {
     createForwardTracker,
     createMessageHandler,
@@ -69,17 +69,17 @@ export function createApp({
 
     // ログイン完了（discord.js 14.27 では ready が非推奨のため clientReady）
     discordClient.once(Events.ClientReady, async (readyClient) => {
-        logger.info(`ログイン完了: ${readyClient.user.tag} / 監視チャンネルID=${config.channelId}`);
+        logger.info(`ログイン完了: ${readyClient.user.tag} / 監視チャンネルID=${config.announceChannelId}`);
         try {
-            const channel = await readyClient.channels.fetch(config.channelId);
+            const channel = await readyClient.channels.fetch(config.announceChannelId);
             if (channel) {
                 logger.info(`監視チャンネル取得成功: name=${channel.name ?? '(名前なし)'} id=${channel.id}`);
             } else {
-                logger.error(`監視チャンネルが見つかりません: id=${config.channelId}`);
+                logger.error(`監視チャンネルが見つかりません: id=${config.announceChannelId}`);
             }
         } catch (error) {
             logger.error(
-                `監視チャンネルの取得に失敗しました (ID違い・権限不足・未参加の可能性): id=${config.channelId}`,
+                `監視チャンネルの取得に失敗しました (ID違い・権限不足・未参加の可能性): id=${config.announceChannelId}`,
                 error,
             );
         }
@@ -92,8 +92,8 @@ export function createApp({
                 destinations: createDestinations({
                     discordClient: readyClient,
                     misskeyClient,
-                    announceChannelId: config.channelId,
-                    twitterChannelId: config.niconico.postChannelId,
+                    announceChannelId: config.announceChannelId,
+                    twitterChannelId: config.shareChannelId,
                 }),
                 logger,
                 stats,
@@ -125,18 +125,18 @@ export function createApp({
         selfId: () => discordClient.user?.id,
         tracker,
         // DISCORD_POST_CHANNEL_ID 設定時のみ、許可 bot の告知を twitter共有用チャンネルへ投稿する
-        share: config.postChannelId
-            ? (text) => sendShare(discordClient, config.postChannelId, text)
+        share: config.shareChannelId
+            ? (text) => sendShare(discordClient, config.shareChannelId, text)
             : null,
     };
     discordClient.on(
         Events.MessageCreate,
-        createMessageHandler(misskeyClient, config.channelId, logger, stats, now, handlerOptions),
+        createMessageHandler(misskeyClient, config.announceChannelId, logger, stats, now, handlerOptions),
     );
     // 通知 bot は embed が後から付くことがあるため、空スキップ済みメッセージの更新を拾う
     discordClient.on(
         Events.MessageUpdate,
-        createMessageUpdateHandler(misskeyClient, config.channelId, logger, stats, handlerOptions),
+        createMessageUpdateHandler(misskeyClient, config.announceChannelId, logger, stats, handlerOptions),
     );
 
     // 生存確認モニタ（READY でない状態が続いたら終了 → launchd が再起動）
@@ -145,8 +145,8 @@ export function createApp({
         logger,
         stats,
         setIntervalFn,
-        writeStatus: createFileStatusWriter(defaultStatusFile(env, homeDir)),
-        maxNotReadyMs: parseMinutes(env.HEALTH_MAX_NOT_READY_MINUTES, 5) * 60 * 1000,
+        writeStatus: createFileStatusWriter(config.health.statusFile),
+        maxNotReadyMs: config.health.maxNotReadyMs,
         getStatus: () => ({
             ready: discordClient.isReady(),
             ping: discordClient.ws.ping,

@@ -4,7 +4,7 @@ import { mkdtempSync, readFileSync, readdirSync, rmSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createFileStatusWriter, createHealthMonitor } from '../src/health.js';
-import { defaultStatusFile, parseMinutes } from '../src/config.js';
+import { defaultStatusFile, loadConfig, parseMinutes } from '../src/config.js';
 import { createStats } from '../src/stats.js';
 
 const MIN = 60000;
@@ -111,5 +111,29 @@ describe('defaultStatusFile', () => {
     it('環境変数優先、無ければ home 配下', () => {
         assert.equal(defaultStatusFile({ HEALTH_STATUS_FILE: '/x/y' }, '/h'), '/x/y');
         assert.equal(defaultStatusFile({}, '/h'), '/h/Library/Logs/sns-collaborator/heartbeat.log');
+    });
+});
+
+describe('loadConfig health', () => {
+    const base = {
+        DISCORD_TOKEN: 't',
+        DISCORD_CHANNEL_ID: 'c',
+        MISSKEY_INSTANCE_URL: 'https://misskey.example',
+        MISSKEY_API_TOKEN: 'm',
+    };
+    it('既定値: home 配下の heartbeat.log と 5 分', () => {
+        assert.deepEqual(loadConfig(base, '/h').health, {
+            statusFile: '/h/Library/Logs/sns-collaborator/heartbeat.log',
+            maxNotReadyMs: 5 * MIN,
+        });
+    });
+    it('HEALTH_STATUS_FILE / HEALTH_MAX_NOT_READY_MINUTES を指定できる', () => {
+        const env = { ...base, HEALTH_STATUS_FILE: '/x/hb.log', HEALTH_MAX_NOT_READY_MINUTES: '2' };
+        assert.deepEqual(loadConfig(env, '/h').health, { statusFile: '/x/hb.log', maxNotReadyMs: 2 * MIN });
+    });
+    it('不正な HEALTH_MAX_NOT_READY_MINUTES は警告なしで既定の 5 分になる', () => {
+        for (const bad of ['abc', '0', '-3', '']) {
+            assert.equal(loadConfig({ ...base, HEALTH_MAX_NOT_READY_MINUTES: bad }, '/h').health.maxNotReadyMs, 5 * MIN, bad);
+        }
     });
 });

@@ -77,7 +77,7 @@ describe('loadConfig', () => {
         MISSKEY_API_TOKEN: 'm',
     };
     it('全て揃っていれば設定を返す', () => {
-        assert.equal(loadConfig(full, '/h').channelId, 'c');
+        assert.equal(loadConfig(full, '/h').announceChannelId, 'c');
     });
     it('欠けている変数名を含むエラーを投げる', () => {
         assert.throws(

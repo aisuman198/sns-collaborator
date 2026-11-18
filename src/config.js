@@ -66,7 +66,6 @@ export function loadConfig(env, home) {
         }
         niconico = {
             userId,
-            postChannelId: env.DISCORD_POST_CHANNEL_ID,
             checkTimes: parseNicoCheckTimes(env.NICONICO_CHECK_TIMES),
             stateFile:
                 env.NICONICO_STATE_FILE ||
@@ -76,12 +75,16 @@ export function loadConfig(env, home) {
     return {
         niconico,
         discordToken: env.DISCORD_TOKEN,
-        channelId: env.DISCORD_CHANNEL_ID,
+        announceChannelId: env.DISCORD_CHANNEL_ID,
         misskeyInstanceUrl: env.MISSKEY_INSTANCE_URL,
         misskeyApiToken: env.MISSKEY_API_TOKEN,
         allowedBotIds: parseIdList(env.DISCORD_ALLOWED_BOT_IDS),
         // twitter共有用チャンネル（未設定なら null = ライブ配信告知の共有投稿は行わない）
-        postChannelId: env.DISCORD_POST_CHANNEL_ID || null,
+        shareChannelId: env.DISCORD_POST_CHANNEL_ID || null,
+        health: {
+            statusFile: defaultStatusFile(env, home),
+            maxNotReadyMs: parseMinutes(env.HEALTH_MAX_NOT_READY_MINUTES, 5) * 60 * 1000,
+        },
     };
 }
 

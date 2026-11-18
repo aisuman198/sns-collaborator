@@ -752,7 +752,6 @@ describe('loadConfig (ニコニコ設定)', () => {
         const c = loadConfig({ ...base, NICONICO_USER_ID: '140498', DISCORD_POST_CHANNEL_ID: 'p' }, '/h');
         assert.deepEqual(c.niconico, {
             userId: '140498',
-            postChannelId: 'p',
             checkTimes: [750, 1290],
             stateFile: '/h/Library/Application Support/sns-collaborator/niconico-state.json',
         });
