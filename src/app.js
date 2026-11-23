@@ -1,20 +1,11 @@
-// 必要なモジュールのインポート
+// 実行専用の入口（dotenv・実依存の組み立て・起動・エラーの受け口）
+import os from 'node:os';
 import dotenv from 'dotenv';
-import { Client, Events, GatewayIntentBits } from 'discord.js';
+import { Client } from 'discord.js';
 import * as Misskey from 'misskey-js';
-import {
-    ConfigError,
-    createForwardTracker,
-    createMessageHandler,
-    createMessageUpdateHandler,
-    loadConfig,
-} from './forwarder.js';
-import { createAnnouncer, createDestinations, createPoller, createStateStore } from './announcer.js';
-import { createHealthMonitor, parseMinutes } from './health.js';
-import { formatCheckTimes } from './schedule.js';
+import { ConfigError } from './config.js';
+import { createApp } from './create-app.js';
 import { createLogger } from './logger.js';
-import { createStats } from './stats.js';
-import { sendShare } from './share.js';
 
 const logger = createLogger();
 
@@ -22,130 +13,20 @@ const logger = createLogger();
 dotenv.config();
 
 async function main() {
-    const config = loadConfig();
-
-    // Discordクライアントの作成
-    const discordClient = new Client({
-        intents: [
-            GatewayIntentBits.Guilds,
-            GatewayIntentBits.GuildMessages,
-            GatewayIntentBits.MessageContent,
-        ],
-    });
-
-    // Misskeyクライアントの作成
-    const misskeyClient = new Misskey.api.APIClient({
-        origin: config.misskeyInstanceUrl,
-        credential: config.misskeyApiToken,
-    });
-
-    const stats = createStats();
-
-    // Discordクライアントのエラーはログ出力のみ（プロセスは落とさない）
-    discordClient.on(Events.Error, (error) => {
-        logger.error('Discord client error:', error);
-    });
-    discordClient.on(Events.Warn, (message) => logger.warn('Discord warn:', message));
-    discordClient.on(Events.ShardDisconnect, (event, shardId) => {
-        logger.warn(`shard ${shardId} 切断 code=${event?.code} reason=${event?.reason ?? ''}`);
-    });
-    discordClient.on(Events.ShardReconnecting, (shardId) => {
-        logger.warn(`shard ${shardId} 再接続中`);
-    });
-    discordClient.on(Events.ShardResume, (shardId, replayed) => {
-        logger.info(`shard ${shardId} 再開 (replayed events=${replayed})`);
-    });
-    discordClient.on(Events.ShardError, (error, shardId) => {
-        logger.error(`shard ${shardId} エラー:`, error);
-    });
-    discordClient.on(Events.Invalidated, () => {
-        logger.error('Discord セッションが無効化されました (invalidated)');
-    });
-
-    // ログイン完了（discord.js 14.27 では ready が非推奨のため clientReady）
-    discordClient.once(Events.ClientReady, async (readyClient) => {
-        logger.info(`ログイン完了: ${readyClient.user.tag} / 監視チャンネルID=${config.channelId}`);
-        try {
-            const channel = await readyClient.channels.fetch(config.channelId);
-            if (channel) {
-                logger.info(`監視チャンネル取得成功: name=${channel.name ?? '(名前なし)'} id=${channel.id}`);
-            } else {
-                logger.error(`監視チャンネルが見つかりません: id=${config.channelId}`);
-            }
-        } catch (error) {
-            logger.error(
-                `監視チャンネルの取得に失敗しました (ID違い・権限不足・未参加の可能性): id=${config.channelId}`,
-                error,
-            );
-        }
-
-        // ニコニコ動画の新着告知（NICONICO_USER_ID 設定時のみ。ClientReady は once なので二重起動しない）
-        if (config.niconico) {
-            const announcer = createAnnouncer({
-                userId: config.niconico.userId,
-                store: createStateStore(config.niconico.stateFile),
-                destinations: createDestinations({
-                    discordClient: readyClient,
-                    misskeyClient,
-                    announceChannelId: config.channelId,
-                    twitterChannelId: config.niconico.postChannelId,
-                }),
-                logger,
-                stats,
-            });
-            createPoller({
-                inspect: announcer.inspect,
-                tick: announcer.tick,
-                checkTimes: config.niconico.checkTimes,
-                logger,
-            }).start();
-            logger.info(
-                `ニコニコ動画の新着告知を開始: userId=${config.niconico.userId} 定刻(JST)=${formatCheckTimes(config.niconico.checkTimes)}`,
-            );
-        }
-    });
-
-    // Discordのイベントキャッチ
-    const tracker = createForwardTracker();
-    const handlerOptions = {
-        allowedBotIds: config.allowedBotIds,
-        selfId: () => discordClient.user?.id,
-        tracker,
-        // DISCORD_POST_CHANNEL_ID 設定時のみ、許可 bot の告知を twitter共有用チャンネルへ投稿する
-        share: config.postChannelId
-            ? (text) => sendShare(discordClient, config.postChannelId, text)
-            : null,
-    };
-    discordClient.on(
-        Events.MessageCreate,
-        createMessageHandler(misskeyClient, config.channelId, logger, stats, Date.now, handlerOptions),
-    );
-    // 通知 bot は embed が後から付くことがあるため、空スキップ済みメッセージの更新を拾う
-    discordClient.on(
-        Events.MessageUpdate,
-        createMessageUpdateHandler(misskeyClient, config.channelId, logger, stats, handlerOptions),
-    );
-
-    // 生存確認モニタ（READY でない状態が続いたら終了 → launchd が再起動）
-    const monitor = createHealthMonitor({
+    const app = createApp({
+        env: process.env,
+        homeDir: os.homedir(),
         logger,
-        stats,
-        maxNotReadyMs: parseMinutes(process.env.HEALTH_MAX_NOT_READY_MINUTES, 5) * 60 * 1000,
-        getStatus: () => ({
-            ready: discordClient.isReady(),
-            ping: discordClient.ws.ping,
-            uptimeMs: Math.round(process.uptime() * 1000),
-        }),
-        onFatal: () => {
-            monitor.stop();
-            discordClient.destroy();
-            process.exit(1);
-        },
+        now: Date.now,
+        fetchFn: fetch,
+        setTimeoutFn: setTimeout,
+        setIntervalFn: setInterval,
+        createDiscordClient: (options) => new Client(options),
+        createMisskeyClient: (options) => new Misskey.api.APIClient(options),
+        uptimeMs: () => Math.round(process.uptime() * 1000),
+        exit: (code) => process.exit(code),
     });
-    monitor.start();
-
-    // Discordクライアントのログイン
-    await discordClient.login(config.discordToken);
+    await app.start();
 }
 
 main().catch((error) => {
